@@ -19,6 +19,9 @@ const DECLARATIONS = [
   'function checkFile(',
   // Stage 2D: /watches.
   'class Watches ',
+  // Stage 2E: /model and /compact.
+  'const pickModel = ',
+  'const COMPACT_PROMPT =',
 ];
 const escape = (s) => s.replace(/[()*]/g, '\\$&');
 

@@ -17,6 +17,7 @@ import { checkSessionId, lockSession } from './lib/sessions.mjs';
 import { addBrowserRoutes } from './lib/browser.mjs';
 import { addWatchRoutes } from './lib/watches.mjs';
 import { addAppRoutes, sharedApps } from './lib/apps.mjs';
+import { addInfoRoutes } from './lib/info.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
 const STOP_FORCE_MS = 8_000;
@@ -66,7 +67,7 @@ export function createApp(config) {
     res.on('close', () => aborter.abort());
     const { memoryDir, ...context } = useContext ? await buildContext(config) : {};
     log('debug', 'ask', `/ask prompt=${brief(prompt, 60)} context=${useContext}`);
-    await pipeSSE(res, logged('ask', askStream(config, { prompt, ...context }, aborter.signal)));
+    await pipeSSE(res, logged('ask', askStream(config, { prompt, ...(config.model ? { model: config.model } : {}), ...context }, aborter.signal)));
   });
 
   /** Reads and checks the body of /execute and /start. */
@@ -149,6 +150,7 @@ export function createApp(config) {
   addBrowserRoutes(app);
   addWatchRoutes(app);
   addAppRoutes(app);
+  addInfoRoutes(app);
 
   const handle = async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;
