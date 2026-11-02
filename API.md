@@ -547,6 +547,56 @@ curl http://127.0.0.1:8737/apps
 curl -X DELETE http://127.0.0.1:8737/apps
 ```
 
+### 2Е. Контекст, сжатие, модель, диагностика
+
+Сессия здесь — как в 2В: можно указать `session_id`, иначе берётся текущая сессия папки. `folder` — внутри `ASK_ROOT`.
+
+| Запрос | Что делает |
+|---|---|
+| `GET /context?folder=&session_id=` | сколько токенов занимают задача, заметки, память и описание папки |
+| `GET /status?folder=&session_id=` | аккаунт, тариф, модель, папка, режим, задача, память, заметки |
+| `POST /compact` | сжать задачу сессии в краткое резюме (SSE) |
+| `GET /models` | модели тарифа и выбранная сейчас |
+| `POST /model` | выбрать модель для следующих задач |
+| `GET /doctor?folder=` | проверки компьютера и сайта |
+| `POST /bug` | отправить отчёт команде сайта |
+
+**`GET /context`** → `{ok, tokens:{task, notes, memory, env}, contextLeft, requests, session_id}`. `contextLeft` — процент
+места до того, как сайт сам сожмёт начало задачи; `session_id` — `null`, если в папке ещё нет сессий. Токены
+оценочные (так же считает сайт).
+
+**`GET /status`** → `{ok, site, account, plan, model, folder, mode, task:{title, requests}, session_id, memory:{chars,
+topics}, notes:{sources:[{where, chars}], clipped}}`. `model` — `null`, пока не выбрана (тогда решает сайт). Сайт
+спрашивается каждый раз: неверный ключ → `401`, сайт недоступен → `502`. Не путать с `GET /status/:taskId`.
+
+**`POST /compact`**, тело `{folder?, session_id?, focus?}`. События: `delta {text}` (резюме по мере написания),
+`usage {input, output}`, затем `done {summary, requests, session_id}` или `error {message}`. После `done` вся
+история сессии — это два сообщения: пометка о сжатии и резюме; название и список запросов остаются. Если сайт
+ответил ошибкой или пустым текстом — история не меняется. Ошибки до потока: `400 too_short` (меньше двух запросов),
+`404` (нет сессии), `409 session_busy` (в сессии идёт задача).
+
+**`POST /model`**, тело `{name}` — `sonnet`, `opus` или полное имя. Ответ `{ok, model}`. Модели нет в тарифе →
+`400 unknown_model` (в сообщении — список доступных). Выбор действует на весь сервер: `/execute`, `/start`, `/ask`
+и `/compact` передают её сайту, пока сервер не перезапущен. `GET /models` → `{ok, models, current}`.
+
+**`GET /doctor`** → `{ok, checks:[{name, ok, value?, fix?}]}`. Проверки: `Node`, `ask` (достижим ли сайт и принимает ли
+ключ), `plan` (есть ли Code в тарифе), `ImageMagick`, `poppler` (PDF), `clipboard`, `editor` (`$EDITOR`), `browser`
+(Chrome/Edge/Brave/Chromium), `ASK.md`. У проверки с `ok: false` есть `fix` — что сделать. Недоступный сайт — это
+проверка `ask` с `ok: false`, а не ошибка запроса.
+
+**`POST /bug`**, тело `{text}` (до 2000 знаков, остальное обрезается) → `{ok, id}`. Сайту уходят только ваш текст и
+версии (сервера, ОС, Node), ничего из папки. Пустой текст → `400`, отказ сайта → `502`.
+
+```bash
+curl "http://127.0.0.1:8737/context"
+curl "http://127.0.0.1:8737/status"
+curl -N -X POST http://127.0.0.1:8737/compact -H 'content-type: application/json' -d '{"focus":"API details"}'
+curl http://127.0.0.1:8737/models
+curl -X POST http://127.0.0.1:8737/model -H 'content-type: application/json' -d '{"name":"sonnet"}'
+curl http://127.0.0.1:8737/doctor
+curl -X POST http://127.0.0.1:8737/bug -H 'content-type: application/json' -d '{"text":"What went wrong"}'
+```
+
 ## Сценарии последовательностей запросов
 
 Во всех примерах `B=http://127.0.0.1:8737` (bash / Git Bash / Linux / macOS). Для расшифровки JSON используется `node -p`.
