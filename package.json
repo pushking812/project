@@ -11,6 +11,7 @@
     "build": "node build/patch.mjs",
     "start": "node build/patch.mjs && node ask-code-server.mjs",
     "pretest": "node build/patch.mjs",
+    "test:live": "node build/patch.mjs && node --test --test-timeout=240000 --test-reporter=tap test/live.mjs",
     "test:browser": "node build/patch.mjs && node --test test/browser-real.mjs",
     "test": "node --test test/integration.mjs test/stage2.mjs test/sessions.mjs test/browser.mjs test/watches.mjs test/diagnostics.mjs test/security.mjs"
   }
