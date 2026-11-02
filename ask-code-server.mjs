@@ -1,12 +1,14 @@
 // HTTP/SSE API around ask-code (stage 1). Listens on 127.0.0.1 only; logs to stderr.
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { loadConfig, VERSION } from './lib/config.mjs';
+import { loadConfig, VERSION, MODES } from './lib/config.mjs';
 import { log, brief, setLogLevel, setLogSecret } from './lib/log.mjs';
 import { HttpError, sendError, sendJson, readJson } from './lib/errors.mjs';
 import { fetchMe, askStream } from './lib/ask-proxy.mjs';
-import { pipeSSE, logged } from './lib/sse.mjs';
+import { pipeSSE, logged, openSSE, writeEvent } from './lib/sse.mjs';
 import { buildContext } from './lib/context.mjs';
+import { TaskRegistry } from './lib/tasks.mjs';
+import { executeTask } from './lib/executor.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
 
@@ -19,11 +21,13 @@ export function createApp(config) {
   const routes = [];
   const route = (method, pattern, handler) => routes.push([method, pattern, handler]);
 
+  const registry = new TaskRegistry({ maxParallel: config.maxParallel });
   const app = {
     config,
     server: null,
-    /** Number of tasks running now (replaced by the task registry). */
-    running: () => 0,
+    registry,
+    /** Number of tasks running now. */
+    running: () => registry.running,
     /** Hooks run on shutdown, before the server closes. */
     onShutdown: [],
     route,
@@ -48,6 +52,25 @@ export function createApp(config) {
     const { memoryDir, ...context } = useContext ? await buildContext(config) : {};
     log('debug', 'ask', `/ask prompt=${brief(prompt, 60)} context=${useContext}`);
     await pipeSSE(res, logged('ask', askStream(config, { prompt, ...context }, aborter.signal)));
+  });
+
+  /** Reads and checks the body of /execute and /start. */
+  const readTaskBody = async (req) => {
+    const { prompt, mode = config.mode } = await readJson(req);
+    if (typeof prompt !== 'string' || !prompt.trim()) throw new HttpError(400, 'prompt must be a non-empty string');
+    if (!MODES.includes(mode)) throw new HttpError(400, `mode must be one of ${MODES.join(', ')}`);
+    return { prompt, mode };
+  };
+
+  route('POST', /^\/execute$/, async (req, res) => {
+    const { prompt, mode } = await readTaskBody(req);
+    const rec = registry.create({ prompt, mode }); // 429 when MAX_PARALLEL tasks run
+    openSSE(res);
+    res.on('close', () => {
+      if (rec.status === 'running') rec.abort.abort();
+    });
+    await executeTask({ rec, config, onEvent: ({ event, data }) => writeEvent(res, event, data) });
+    if (!res.writableEnded) res.end();
   });
 
   const handle = async (req, res) => {
@@ -109,8 +132,11 @@ export function createApp(config) {
 }
 
 async function main() {
-  // doTool of ask-code prints its progress with process.stdout: keep stdout free, send it to the log.
-  process.stdout.write = (chunk, ...rest) => process.stderr.write(chunk, ...rest);
+  // doTool of ask-code prints its progress (even file diffs) to stdout. That must reach neither stdout nor the log.
+  process.stdout.write = (chunk, encoding, callback) => {
+    (typeof encoding === 'function' ? encoding : callback)?.();
+    return true;
+  };
 
   let config;
   try {

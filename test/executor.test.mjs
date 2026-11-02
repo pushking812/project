@@ -55,7 +55,7 @@ test('a task that reads a file ends done with the step noted', async () => {
   assert.deepEqual(rec.steps, ['read src/add.js']);
   assert.deepEqual(rec.usage, { input: 3, output: 4 });
   assert.ok(rec.finishedAt);
-  assert.deepEqual(seen, ['status', 'status', 'tool', 'delta', 'delta', 'usage', 'done']);
+  assert.deepEqual(seen, ['status', 'tool', 'delta', 'delta', 'usage', 'done']);
   assert.equal(sent.length, 1);
   assert.equal(sent[0].callId, '1');
   assert.equal(FakeApps.stopped, 1, 'apps.stopAll() runs at the end');
