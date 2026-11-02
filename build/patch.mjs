@@ -17,6 +17,8 @@ const DECLARATIONS = [
   // Stage 2B-sessions (2В): a session title and the file name check of /export.
   'const titleOf = ',
   'function checkFile(',
+  // Stage 2D: /watches.
+  'class Watches ',
 ];
 const escape = (s) => s.replace(/[()*]/g, '\\$&');
 
@@ -31,6 +33,15 @@ export function patch(source) {
     const plain = new RegExp(`^${escape(decl)}`, 'm');
     if (!plain.test(out)) throw new Error(`patch: "${decl}" not found in vendor/ask-code.mjs (a new version of the monolith?)`);
     out = out.replace(plain, `export ${decl}`);
+  }
+  // Windows: child.kill() ends only the cmd shell, so `node serve.mjs &` lived on. Kill the whole tree instead.
+  const winKill = "else child.kill('SIGTERM');";
+  if (!out.includes('taskkill')) {
+    if (!out.includes(winKill)) throw new Error('patch: stopTree not found in vendor/ask-code.mjs (a new version of the monolith?)');
+    out = out.replace(
+      winKill,
+      "else if (child.pid) execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {});\n    else child.kill('SIGTERM');",
+    );
   }
   return out;
 }
