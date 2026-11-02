@@ -86,7 +86,10 @@ test('3. /ask streams an answer', { skip }, async () => {
 });
 
 test('4. /execute reads a file with a tool and keeps a session', { skip }, async () => {
-  const r = await call('POST', '/execute', { prompt: 'Read hello.txt and tell me the secret word.' });
+  const created = await call('POST', '/sessions', { title: 'live test' });
+  assert.equal(created.status, 200, created.text.slice(0, 300));
+  sessionId = created.json.session_id;
+  const r = await call('POST', '/execute', { prompt: 'Read hello.txt and tell me the secret word.', session_id: sessionId });
   assert.equal(r.status, 200, r.text.slice(0, 300));
   const ev = parseSSE(r.text);
   note('execute events:', ev.map((e) => e.event).join(','));
@@ -95,7 +98,6 @@ test('4. /execute reads a file with a tool and keeps a session', { skip }, async
   assert.ok(done, 'no done event');
   const all = ev.map((e) => JSON.stringify(e.data)).join(' ').toLowerCase();
   assert.ok(all.includes('pelican'), 'the answer does not mention the file content');
-  sessionId = ev.find((e) => e.event === 'session')?.data?.session_id ?? done.data?.session_id;
   note('session_id:', sessionId);
 });
 
@@ -124,9 +126,9 @@ test('7. /model picks a listed model and /ask still works', { skip }, async () =
   const m = await call('GET', '/models');
   const first = m.json.models[0];
   const name = typeof first === 'string' ? first : first.id ?? first.name;
-  const bad = await call('POST', '/model', { model: 'no-such-model-xyz' });
+  const bad = await call('POST', '/model', { name: 'no-such-model-xyz' });
   assert.equal(bad.status, 400);
-  const ok = await call('POST', '/model', { model: name });
+  const ok = await call('POST', '/model', { name });
   note('model:', name, ok.status);
   assert.equal(ok.status, 200, ok.text.slice(0, 300));
   const r = await call('POST', '/ask', { prompt: 'Reply with the single word: ok' });
