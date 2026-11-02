@@ -507,6 +507,46 @@ curl -X POST http://127.0.0.1:8737/browser -H 'content-type: application/json' -
 curl -N -X POST http://127.0.0.1:8737/browser -H 'content-type: application/json' -d '{"action":"handoff","text":"Solve the captcha"}'
 ```
 
+### 2Д. Наблюдения (watches) и приложения (apps)
+
+**Наблюдения.** Страница или команда, которую сервер проверяет по таймеру и сообщает человеку, когда на странице
+появилось нужное слово.
+
+| Запрос | Что делает |
+|---|---|
+| `GET /watches` | `{ok, watches:[{id, target, url, everyMs, checks, alerts, wanted, error}]}` |
+| `POST /watches` | тело `{spec, mode?, allowedSites?}`; ответ `{ok, id, target, everyMs, wanted, checks, error}` |
+| `DELETE /watches/:id` | `{ok: true}` |
+| `DELETE /watches` | `{ok: true, output: "All watches stopped."}` |
+
+`spec` — как в CLI: `https://example.com every 5m for "available"`. Вместо адреса можно дать команду.
+
+- Для страницы нужно открытое окно браузера: сначала `POST /browser {"action":"open",...}`, иначе `400 browser_off`.
+- Адрес проверяется так же, как в `/browser`: `403 refused_url`, `403 site_not_allowed` (в режимах не `all` нужен
+  `allowedSites`).
+- Команда на каждой проверке — то же, что запуск команд: в режимах `edits` и `plan` она отклоняется.
+- Нечитаемый `spec` → `400 bad_spec`. Неизвестный `id` → `404 not_found`.
+- Все наблюдения останавливаются вместе с сервером.
+
+**Приложения.** То, что сервер или его задачи запустили и что продолжает работать (dev-сервер и т. п.).
+
+| Запрос | Что делает |
+|---|---|
+| `GET /apps` | `{ok, apps:[{n, command, url, running}]}`, сначала по `n` |
+| `DELETE /apps/:n` | остановить одно; `404 not_found`, если такого нет |
+| `DELETE /apps` | остановить всё; `{ok, output}` |
+
+Номера `n` общие для `/command` и для работающих задач. На Windows останавливается всё дерево процессов
+(`taskkill /T /F`), иначе оставался бы внук вроде `node server.js`.
+
+```bash
+curl -X POST http://127.0.0.1:8737/watches -H 'content-type: application/json' -d '{"spec":"https://example.com every 5m for \"available\""}'
+curl http://127.0.0.1:8737/watches
+curl -X DELETE http://127.0.0.1:8737/watches/1
+curl http://127.0.0.1:8737/apps
+curl -X DELETE http://127.0.0.1:8737/apps
+```
+
 ## Сценарии последовательностей запросов
 
 Во всех примерах `B=http://127.0.0.1:8737` (bash / Git Bash / Linux / macOS). Для расшифровки JSON используется `node -p`.
