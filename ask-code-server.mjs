@@ -13,6 +13,7 @@ import { Apps } from './build/ask-code-core.mjs';
 import { addFileRoutes } from './lib/files.mjs';
 import { addMemoryRoutes } from './lib/memory.mjs';
 import { addSessionRoutes } from './lib/session-routes.mjs';
+import { checkSessionId, lockSession } from './lib/sessions.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
 const STOP_FORCE_MS = 8_000;
@@ -64,15 +65,28 @@ export function createApp(config) {
 
   /** Reads and checks the body of /execute and /start. */
   const readTaskBody = async (req) => {
-    const { prompt, mode = config.mode } = await readJson(req);
+    const { prompt, mode = config.mode, session_id: sessionId } = await readJson(req);
     if (typeof prompt !== 'string' || !prompt.trim()) throw new HttpError(400, 'prompt must be a non-empty string');
     if (!MODES.includes(mode)) throw new HttpError(400, `mode must be one of ${MODES.join(', ')}`);
-    return { prompt, mode };
+    if (sessionId !== undefined) checkSessionId(sessionId);
+    return { prompt, mode, sessionId };
+  };
+
+  /** A task record. With a session_id the session is taken for it (409 when a task already runs in it). */
+  const createTask = ({ prompt, mode, sessionId }) => {
+    const release = sessionId ? lockSession(config, config.root, sessionId) : null;
+    try {
+      const rec = registry.create({ prompt, mode, sessionId: sessionId ?? null }); // 429 when MAX_PARALLEL tasks run
+      rec.release = release;
+      return rec;
+    } catch (e) {
+      release?.();
+      throw e;
+    }
   };
 
   route('POST', /^\/execute$/, async (req, res) => {
-    const { prompt, mode } = await readTaskBody(req);
-    const rec = registry.create({ prompt, mode }); // 429 when MAX_PARALLEL tasks run
+    const rec = createTask(await readTaskBody(req));
     openSSE(res);
     res.on('close', () => {
       if (rec.status === 'running') rec.abort.abort();
@@ -82,10 +96,10 @@ export function createApp(config) {
   });
 
   route('POST', /^\/start$/, async (req, res) => {
-    const { prompt, mode } = await readTaskBody(req);
+    const body = await readTaskBody(req);
     let rec;
     try {
-      rec = registry.create({ prompt, mode });
+      rec = createTask(body);
     } catch (e) {
       if (e.status === 429) log('warn', 'tasks', `max parallel reached (${config.maxParallel}), rejecting`);
       throw e;
