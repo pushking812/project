@@ -103,3 +103,36 @@ curl -i http://127.0.0.1:8737/sessions/no-such-session
 curl -i "http://127.0.0.1:8737/sessions/bad%20id"
 curl -i -X POST http://127.0.0.1:8737/execute -H "Content-Type: application/json" -d '{"prompt":"x","session_id":"bad id!"}'
 curl -i -X POST http://127.0.0.1:8737/sessions/$SID/export -H "Content-Type: application/json" -d '{"filename":"x.md","mode":"plan"}'
+
+# --- 2Г: браузер (нужен Chrome/Edge/Brave/Chromium; ключ ASK_KEY не нужен) ---
+curl -s -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json" -d '{"action":"open","url":"https://example.com"}'
+curl -s -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json" -d '{"action":"read"}'
+curl -s -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json" -d '{"action":"click","selector":"text=More information"}'
+curl -s -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json" -d '{"action":"screenshot"}'
+# 403 plan_mode: click в режиме plan
+curl -i -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json" -d '{"action":"click","selector":"a","mode":"plan"}'
+# передача окна человеку (SSE); сервер запущен с ASK_BROWSER_HEADLESS=0, иначе 400 headless_handoff
+curl -N -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json" -d '{"action":"handoff","text":"Solve the captcha"}'
+curl -s -X POST http://127.0.0.1:8737/browser/handoff/done -H "Content-Type: application/json" -d '{"note":"logged in"}'
+curl -s -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json" -d '{"action":"close"}'
+
+# --- 2Д: watches и apps (для страницы сначала browser open) ---
+curl -s -X POST http://127.0.0.1:8737/watches -H "Content-Type: application/json" -d '{"spec":"https://example.com every 5m for \"available\""}'
+curl -s http://127.0.0.1:8737/watches
+curl -s -X DELETE http://127.0.0.1:8737/watches/1
+curl -s -X DELETE http://127.0.0.1:8737/watches
+curl -s http://127.0.0.1:8737/apps
+# 404 нет такого приложения
+curl -i -X DELETE http://127.0.0.1:8737/apps/9999
+curl -s -X DELETE http://127.0.0.1:8737/apps
+
+# --- 2Е: контекст, сжатие, модель, диагностика (/status, /models, /bug ходят на сайт ask) ---
+curl -s http://127.0.0.1:8737/context
+curl -s http://127.0.0.1:8737/status
+curl -N -X POST http://127.0.0.1:8737/compact -H "Content-Type: application/json" -d '{"focus":"API details"}'
+curl -s http://127.0.0.1:8737/models
+curl -s -X POST http://127.0.0.1:8737/model -H "Content-Type: application/json" -d '{"name":"sonnet"}'
+# 400 unknown_model
+curl -i -X POST http://127.0.0.1:8737/model -H "Content-Type: application/json" -d '{"name":"no-such-model"}'
+curl -s http://127.0.0.1:8737/doctor
+curl -s -X POST http://127.0.0.1:8737/bug -H "Content-Type: application/json" -d '{"text":"What went wrong"}'

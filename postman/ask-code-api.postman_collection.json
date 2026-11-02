@@ -556,6 +556,264 @@
           }
         }
       ]
+    },
+    {
+      "name": "Этап 2Г: браузер",
+      "description": "Порядок: open -> read -> click -> screenshot -> close. Нужен Chrome/Edge/Brave/Chromium. handoff требует сервер с ASK_BROWSER_HEADLESS=0.",
+      "item": [
+        {
+          "name": "POST /browser open",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('ok', () => pm.expect(pm.response.json().ok).to.eql(true));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"action\": \"open\", \"url\": \"https://example.com\" }" },
+            "url": "{{baseUrl}}/browser"
+          }
+        },
+        {
+          "name": "POST /browser read",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('output - строка', () => pm.expect(pm.response.json().output).to.be.a('string'));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"action\": \"read\" }" },
+            "url": "{{baseUrl}}/browser"
+          }
+        },
+        {
+          "name": "POST /browser click",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"action\": \"click\", \"selector\": \"text=More information\" }" },
+            "url": "{{baseUrl}}/browser",
+            "description": "В режимах edits/plan клик, уводящий на сайт вне allowedSites, возвращает окно назад и даёт 403 site_not_allowed."
+          }
+        },
+        {
+          "name": "POST /browser screenshot",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('есть картинка', () => pm.expect(pm.response.json().images).to.be.an('array').that.is.not.empty);"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"action\": \"screenshot\" }" },
+            "url": "{{baseUrl}}/browser"
+          }
+        },
+        {
+          "name": "POST /browser handoff (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"action\": \"handoff\", \"text\": \"Solve the captcha\" }" },
+            "url": "{{baseUrl}}/browser",
+            "description": "Поток status -> delta -> done|error. Без ASK_BROWSER_HEADLESS=0 ответ 400 headless_handoff."
+          }
+        },
+        {
+          "name": "POST /browser/handoff/done",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"note\": \"logged in\" }" },
+            "url": "{{baseUrl}}/browser/handoff/done",
+            "description": "Завершает handoff без капчи (пароль, код). Если передачи нет - 409 no_handoff."
+          }
+        },
+        {
+          "name": "POST /browser plan + click - 403",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('403 plan_mode', () => { pm.response.to.have.status(403); pm.expect(pm.response.json().code).to.eql('plan_mode'); });"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"action\": \"click\", \"selector\": \"a\", \"mode\": \"plan\" }" },
+            "url": "{{baseUrl}}/browser"
+          }
+        },
+        {
+          "name": "POST /browser close",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"action\": \"close\" }" },
+            "url": "{{baseUrl}}/browser"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Этап 2Д: watches и apps",
+      "description": "Наблюдение за страницей требует открытого браузера (сначала 2Г open).",
+      "item": [
+        {
+          "name": "POST /watches",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('watchId', String(pm.response.json().id));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"spec\": \"https://example.com every 5m for \\\"available\\\"\" }" },
+            "url": "{{baseUrl}}/watches"
+          }
+        },
+        {
+          "name": "GET /watches",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('watches - массив', () => pm.expect(pm.response.json().watches).to.be.an('array'));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/watches" }
+        },
+        {
+          "name": "DELETE /watches/:id",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/watches/{{watchId}}" }
+        },
+        {
+          "name": "POST /watches - 400 (bad_spec)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400', () => pm.response.to.have.status(400));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"spec\": \"nonsense\" }" },
+            "url": "{{baseUrl}}/watches"
+          }
+        },
+        {
+          "name": "DELETE /watches (все)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/watches" }
+        },
+        {
+          "name": "GET /apps",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('apps - массив', () => pm.expect(pm.response.json().apps).to.be.an('array'));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/apps" }
+        },
+        {
+          "name": "DELETE /apps/:n - 404",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));"
+          ] } }],
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/apps/9999" }
+        },
+        {
+          "name": "DELETE /apps (все)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/apps" }
+        }
+      ]
+    },
+    {
+      "name": "Этап 2Е: контекст, модель, диагностика",
+      "description": "/status, /models и /bug ходят на сайт ask: нужен реальный ASK_KEY. /compact нужна сессия минимум с двумя запросами.",
+      "item": [
+        {
+          "name": "GET /context",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('tokens', () => pm.expect(pm.response.json().tokens).to.be.an('object'));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/context" }
+        },
+        {
+          "name": "GET /status (аккаунт)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('folder', () => pm.expect(pm.response.json().folder).to.be.a('string'));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/status", "description": "Не путать с GET /status/:taskId." }
+        },
+        {
+          "name": "POST /compact (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"session_id\": \"{{sessionId}}\", \"focus\": \"API details\" }" },
+            "url": "{{baseUrl}}/compact",
+            "description": "Потоки: delta, usage, done {summary}. Меньше двух запросов - 400 too_short."
+          }
+        },
+        {
+          "name": "GET /models",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('models', () => pm.expect(pm.response.json().models).to.be.an('array'));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/models" }
+        },
+        {
+          "name": "POST /model",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"name\": \"sonnet\" }" },
+            "url": "{{baseUrl}}/model",
+            "description": "Выбор действует на весь сервер. Неизвестное имя - 400 unknown_model."
+          }
+        },
+        {
+          "name": "POST /model - 400 (unknown_model)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400 unknown_model', () => { pm.response.to.have.status(400); pm.expect(pm.response.json().code).to.eql('unknown_model'); });"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"name\": \"no-such-model\" }" },
+            "url": "{{baseUrl}}/model"
+          }
+        },
+        {
+          "name": "GET /doctor",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('checks', () => pm.expect(pm.response.json().checks).to.be.an('array'));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/doctor" }
+        },
+        {
+          "name": "POST /bug",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('id', () => pm.expect(pm.response.json().id).to.exist);"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"text\": \"Postman check\" }" },
+            "url": "{{baseUrl}}/bug",
+            "description": "Отправляет настоящий отчёт на сайт ask."
+          }
+        }
+      ]
     }
   ]
 }
