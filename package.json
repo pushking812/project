@@ -1,0 +1,16 @@
+{
+  "name": "ask-code-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node.js HTTP/SSE API around ask-code (stage 1 of ask-code-mcp)",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node build/patch.mjs",
+    "start": "node build/patch.mjs && node ask-code-server.mjs",
+    "pretest": "node build/patch.mjs",
+    "test": "node test/integration.mjs"
+  }
+}

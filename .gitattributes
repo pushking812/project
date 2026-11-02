@@ -1,0 +1,2 @@
+# The vendored monolith must stay byte-for-byte as downloaded.
+vendor/ask-code.mjs -text
