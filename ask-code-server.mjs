@@ -11,6 +11,7 @@ import { TaskRegistry } from './lib/tasks.mjs';
 import { executeTask } from './lib/executor.mjs';
 import { Apps } from './build/ask-code-core.mjs';
 import { addFileRoutes } from './lib/files.mjs';
+import { addMemoryRoutes } from './lib/memory.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
 const STOP_FORCE_MS = 8_000;
@@ -122,6 +123,7 @@ export function createApp(config) {
 
   // Stage 2
   addFileRoutes(app);
+  addMemoryRoutes(app);
 
   const handle = async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;

@@ -180,3 +180,73 @@ test('POST /command does not pass ASK_KEY to the command', async () => {
     delete process.env.ASK_KEY;
   }
 });
+
+// ─── 2B: notes and memory ───────────────────────────────────────────────────────────────────────
+
+test('POST /remember adds to ASK.md, GET /notes shows it; plan, empty note and a folder outside are refused', async () => {
+  const r = await post('/remember', { note: 'tests run with npm test' });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.output, 'Saved in ASK.md.');
+  assert.match(readFileSync(join(root, 'ASK.md'), 'utf8'), /- tests run with npm test/);
+
+  const n = await get('/notes');
+  assert.equal(n.status, 200);
+  assert.match(n.json.text, /tests run with npm test/);
+  assert.ok(n.json.sources.some((s) => s.where === 'ASK.md' && s.chars > 0));
+  assert.equal(typeof n.json.clipped, 'boolean');
+
+  assert.equal((await post('/remember', {})).status, 400);
+  assert.equal((await post('/remember', { note: 'x', mode: 'plan' })).status, 403);
+  assert.equal((await post('/remember', { note: 'x', folder: '..' })).status, 403);
+  assert.equal((await get('/notes?folder=..')).status, 400);
+  assert.equal((await get('/notes?folder=src')).status, 200);
+  assert.equal((await get('/notes?folder=nope')).status, 404);
+});
+
+test('memory: write, list, read, edit; bad topics and plan are refused; DELETE clears', async () => {
+  try {
+    const empty = await get('/memory');
+    assert.equal(empty.status, 200);
+    assert.deepEqual(empty.json.topics, []);
+
+    const w = await post('/memory', { topic: 'project.md', content: '## Project\nNode 22\n' });
+    assert.equal(w.status, 200);
+    assert.match(w.json.output, /Saved \.ask-memory\/project\.md/);
+    await post('/memory', { topic: 'MEMORY.md', content: '- [project](project.md)\n' });
+
+    const list = await get('/memory');
+    assert.deepEqual(list.json.topics, ['project.md']);
+    assert.match(list.json.index, /project\.md/);
+    assert.equal(typeof list.json.dir, 'string');
+
+    const t = await get('/memory/project.md');
+    assert.equal(t.status, 200);
+    assert.match(t.json.text, /Node 22/);
+
+    const e = await post('/memory', { topic: 'project.md', old_text: 'Node 22', new_text: 'Node 24' });
+    assert.equal(e.status, 200);
+    assert.match((await get('/memory/project.md')).json.text, /Node 24/);
+    assert.equal((await post('/memory', { topic: 'project.md', old_text: 'zzz', new_text: 'a' })).status, 409);
+    assert.equal((await post('/memory', { topic: 'none.md', old_text: 'a', new_text: 'b' })).status, 404);
+
+    assert.equal((await post('/memory', { topic: 'notes.txt', content: 'x' })).status, 400);
+    assert.equal((await post('/memory', { topic: '../x.md', content: 'x' })).status, 400);
+    assert.equal((await post('/memory', { topic: 'a.md' })).status, 400);
+    const big = await post('/memory', { topic: 'big.md', content: 'x'.repeat(40_001) });
+    assert.equal(big.status, 400);
+    assert.equal(big.json.code, 'too_big');
+    assert.equal((await post('/memory', { topic: 'p.md', content: 'x', mode: 'plan' })).status, 403);
+    assert.equal((await get('/memory/none.md')).status, 404);
+    assert.equal((await get('/memory/notes.txt')).status, 400);
+
+    assert.equal((await call('DELETE', '/memory?mode=plan')).status, 403);
+    assert.equal((await call('DELETE', '/memory?mode=edits')).status, 403);
+    assert.equal((await get('/memory')).json.topics.length, 1);
+    const d = await call('DELETE', '/memory');
+    assert.equal(d.status, 200);
+    assert.equal(d.json.output, 'Cleared.');
+    assert.deepEqual((await get('/memory')).json.topics, []);
+  } finally {
+    await call('DELETE', '/memory');
+  }
+});
