@@ -14,6 +14,7 @@ import { addFileRoutes } from './lib/files.mjs';
 import { addMemoryRoutes } from './lib/memory.mjs';
 import { addSessionRoutes } from './lib/session-routes.mjs';
 import { checkSessionId, lockSession } from './lib/sessions.mjs';
+import { addBrowserRoutes } from './lib/browser.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
 const STOP_FORCE_MS = 8_000;
@@ -140,6 +141,7 @@ export function createApp(config) {
   addFileRoutes(app);
   addMemoryRoutes(app);
   addSessionRoutes(app);
+  addBrowserRoutes(app);
 
   const handle = async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;
