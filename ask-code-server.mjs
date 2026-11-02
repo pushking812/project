@@ -73,6 +73,39 @@ export function createApp(config) {
     if (!res.writableEnded) res.end();
   });
 
+  route('POST', /^\/start$/, async (req, res) => {
+    const { prompt, mode } = await readTaskBody(req);
+    let rec;
+    try {
+      rec = registry.create({ prompt, mode });
+    } catch (e) {
+      if (e.status === 429) log('warn', 'tasks', `max parallel reached (${config.maxParallel}), rejecting`);
+      throw e;
+    }
+    executeTask({ rec, config }).catch((e) => log('error', 'tasks', `${rec.id} crashed: ${e.message}`));
+    sendJson(res, 200, { taskId: rec.id, status: 'running' });
+  });
+
+  const findTask = (id) => {
+    const rec = registry.get(id);
+    if (!rec) throw new HttpError(404, 'unknown taskId');
+    return rec;
+  };
+
+  route('GET', /^\/status\/([^/]+)$/, (req, res, m) => sendJson(res, 200, TaskRegistry.view(findTask(m[1]))));
+
+  route('POST', /^\/stop\/([^/]+)$/, (req, res, m) => {
+    const rec = findTask(m[1]);
+    if (rec.status === 'running') {
+      rec.abort.abort();
+      try {
+        rec.ctx?.apps.stopAll();
+      } catch {}
+      void rec.ctx?.browser?.close?.();
+    }
+    sendJson(res, 200, { status: rec.status === 'running' ? 'stopping' : rec.status });
+  });
+
   const handle = async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;
     let known = false;
