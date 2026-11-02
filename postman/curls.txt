@@ -111,10 +111,20 @@ curl -s -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json
 curl -s -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json" -d '{"action":"screenshot"}'
 # 403 plan_mode: click в режиме plan
 curl -i -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json" -d '{"action":"click","selector":"a","mode":"plan"}'
-# передача окна человеку (SSE); сервер запущен с ASK_BROWSER_HEADLESS=0, иначе 400 headless_handoff
+# передача окна человеку (SSE); невидимое окно показывается полем "headless":false, иначе 400 headless_handoff
+# (то же поле: curl -s -X POST $U/browser -H "$H" -d '{"action":"read","headless":false}'; состояние: curl -s $U/browser)
 curl -N -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json" -d '{"action":"handoff","text":"Solve the captcha"}'
 curl -s -X POST http://127.0.0.1:8737/browser/handoff/done -H "Content-Type: application/json" -d '{"note":"logged in"}'
+# captcha:"handoff": капча мешает -> сервер сам показывает окно и зовёт человека; поток result -> status -> done (без капчи обычный JSON)
+curl -N -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json" -d '{"action":"open","url":"https://example.com","captcha":"handoff"}'
+# то же для задачи (/execute, /start)
+curl -N -X POST http://127.0.0.1:8737/execute -H "Content-Type: application/json" -d '{"prompt":"open https://example.com and read it","browser":true,"captcha":"handoff"}'
 curl -s -X POST http://127.0.0.1:8737/browser -H "Content-Type: application/json" -d '{"action":"close"}'
+# задача с собственным окном браузера (нужен ASK_KEY); в edits/plan открываются только сайты из allowedSites
+curl -N -X POST http://127.0.0.1:8737/execute -H "Content-Type: application/json" -d '{"prompt":"open http://localhost:3000 in the browser and tell me the page title","mode":"edits","browser":true,"allowedSites":["localhost"]}'
+# 400 bad_request: browser не булево
+curl -i -X POST http://127.0.0.1:8737/execute -H "Content-Type: application/json" -d '{"prompt":"x","browser":"yes"}'
+# Windows: curl.exe -N -X POST http://127.0.0.1:8737/execute -H "Content-Type: application/json" -d "{\"prompt\":\"open http://localhost:3000 and tell me the page title\",\"mode\":\"edits\",\"browser\":true,\"allowedSites\":[\"localhost\"]}"
 
 # --- 2Д: watches и apps (для страницы сначала browser open) ---
 curl -s -X POST http://127.0.0.1:8737/watches -H "Content-Type: application/json" -d '{"spec":"https://example.com every 5m for \"available\""}'

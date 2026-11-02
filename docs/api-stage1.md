@@ -34,7 +34,8 @@ npm test                       # 85 integration tests against a stand-in for the
 | `ASK_MODE` | `all` | no | default mode of `/execute` and `/start` |
 | `ASK_MAX_PARALLEL` | `3` | no | tasks running at once |
 | `ASK_LOG_LEVEL` | `info` | no | `debug` \| `info` \| `warn` \| `error` |
-| `ASK_BROWSER_HEADLESS` | `1` | no | `0` — the browser of `POST /browser` opens a visible window (needed for `handoff`) |
+| `ASK_BROWSER_HEADLESS` | `1` | no | `0` — the browser of `POST /browser` starts as a visible window (needed for `handoff`). The `headless` field of a request overrides it at any time |
+| `ASK_CAPTCHA` | `manual` | no | `handoff` — when a captcha is in the way, the server shows the window and calls the person itself; `manual` only reports `handoff_needed`. The `captcha` field of a request overrides it |
 | `ASK_BROWSER_DIR` | `~/.config/ask-code/browser` | no | profile folder of the browser |
 | `ASK_BROWSER` | search for Chrome/Edge/Brave/Chromium | no | path to the browser binary (read by ask-code) |
 
@@ -267,7 +268,7 @@ data: {"message":"..."}
 | `allowedSites` | string[] | нет | хосты, которые модель может открывать без `mode: "all"` (как в `/browser`). В `edits` и `plan` остальные сайты отклоняются, спросить некого |
 
 В `plan` браузер только смотрит (открыть, прочитать, скриншот, прокрутка). Ввод пароля или карты отклоняется. Капчу
-модель сама не решает. `handoff` в задаче работает только при `ASK_BROWSER_HEADLESS=0`, иначе инструмент сразу отвечает
+модель сама не решает. `handoff` в задаче работает только при `"headless": false` в запросе или `ASK_BROWSER_HEADLESS=0`, иначе инструмент сразу отвечает
 отказом, а не ждёт человека 8 минут. Это окно не то же, что у `POST /browser`: у каждой задачи своё. Неверный тип
 `browser` или `allowedSites` — `400 bad_request`.
 

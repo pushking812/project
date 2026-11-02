@@ -1,7 +1,7 @@
 // HTTP/SSE API around ask-code (stage 1). Listens on 127.0.0.1 only; logs to stderr.
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { loadConfig, VERSION, MODES } from './lib/config.mjs';
+import { loadConfig, VERSION, MODES, CAPTCHA_MODES } from './lib/config.mjs';
 import { log, brief, setLogLevel, setLogSecret } from './lib/log.mjs';
 import { HttpError, sendError, sendJson, readJson } from './lib/errors.mjs';
 import { fetchMe, askStream } from './lib/ask-proxy.mjs';
@@ -75,7 +75,7 @@ export function createApp(config) {
 
   /** Reads and checks the body of /execute and /start. */
   const readTaskBody = async (req) => {
-    const { prompt, mode = config.mode, session_id: sessionId, browser = false, allowedSites } = await readJson(req);
+    const { prompt, mode = config.mode, session_id: sessionId, browser = false, allowedSites, headless, captcha } = await readJson(req);
     if (typeof prompt !== 'string' || !prompt.trim()) throw new HttpError(400, 'prompt must be a non-empty string');
     if (!MODES.includes(mode)) throw new HttpError(400, `mode must be one of ${MODES.join(', ')}`);
     if (sessionId !== undefined) checkSessionId(sessionId);
@@ -83,14 +83,16 @@ export function createApp(config) {
     if (allowedSites !== undefined && (!Array.isArray(allowedSites) || allowedSites.some((s) => typeof s !== 'string'))) {
       throw new HttpError(400, 'allowedSites must be a list of host names', 'bad_request');
     }
-    return { prompt, mode, sessionId, browser, allowedSites: (allowedSites ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean) };
+    if (headless !== undefined && typeof headless !== 'boolean') throw new HttpError(400, 'headless must be true or false', 'bad_request');
+    if (captcha !== undefined && !CAPTCHA_MODES.includes(captcha)) throw new HttpError(400, `captcha must be one of ${CAPTCHA_MODES.join(', ')}`, 'bad_request');
+    return { prompt, mode, sessionId, browser, headless, captcha, allowedSites: (allowedSites ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean) };
   };
 
   /** A task record. With a session_id the session is taken for it (409 when a task already runs in it). */
-  const createTask = ({ prompt, mode, sessionId, browser, allowedSites }) => {
+  const createTask = ({ prompt, mode, sessionId, browser, headless, captcha, allowedSites }) => {
     const release = sessionId ? lockSession(config, config.root, sessionId) : null;
     try {
-      const rec = registry.create({ prompt, mode, sessionId: sessionId ?? null, browser, allowedSites }); // 429 when MAX_PARALLEL tasks run
+      const rec = registry.create({ prompt, mode, sessionId: sessionId ?? null, browser, headless, captcha, allowedSites }); // 429 when MAX_PARALLEL tasks run
       rec.release = release;
       return rec;
     } catch (e) {

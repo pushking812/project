@@ -20,9 +20,14 @@ class FakeBrowser {
   }
   async start() {}
   async captchaSigns() {
-    return { frames: [], marks: 0, mark: '', solved: false, inputs: 3, text: 'Hello', words: 20 };
+    const none = { frames: [], marks: 0, mark: '', solved: false, inputs: 3, text: 'Hello', words: 20 };
+    if (this.url.startsWith('https://captcha.test/check') && !this.solved) return { ...none, frames: ['https://challenges.cloudflare.com/cdn-cgi/challenge-platform/frame=challenge'], inputs: 0 };
+    return none;
   }
-  async front() {}
+  async front() {
+    this.fronted = true;
+    setTimeout(() => (this.solved = true), 100); // the person solves it in the window
+  }
   async here() {
     return { url: this.url, title: 'Fake page' };
   }
@@ -114,6 +119,38 @@ test('handoff in a headless window: refused at once, the person cannot see it', 
   assert.equal(r.answer.ok, false);
   assert.match(r.answer.output, /headless/);
   assert.equal(r.made[0].calls.length, 0);
+});
+
+test('"headless" of the request decides the window of the task, not ASK_BROWSER_HEADLESS', async () => {
+  const shown = await runBrowserTask({ browser: true, headless: false }, { action: 'open', url: 'https://example.com' });
+  assert.equal(shown.made[0].headless, false);
+  const hidden = await runBrowserTask({ browser: true, headless: true }, { action: 'open', url: 'https://example.com' });
+  assert.equal(hidden.made[0].headless, true);
+  assert.equal((await post('/execute', { prompt: 'x', browser: true, headless: 'no' })).status, 400);
+});
+
+test('"captcha": "handoff": a captcha in the way of an invisible window shows it on the same page and calls the person', async () => {
+  const r = await runBrowserTask({ browser: true, captcha: 'handoff' }, { action: 'open', url: 'https://captcha.test/check' });
+  assert.equal(r.res.status, 200);
+  assert.equal(r.made.length, 2, 'a visible window replaces the invisible one');
+  assert.equal(r.made[0].headless, true);
+  assert.equal(r.made[0].closed, true);
+  assert.equal(r.made[1].headless, false);
+  assert.equal(r.made[1].fronted, true, 'brought to the front for the person');
+  assert.equal(r.made[1].calls[0].url, 'https://captcha.test/check', 'on the page with the captcha');
+  assert.ok(!r.made[1].calls.some((c) => ['click', 'type', 'press'].includes(c.action)), 'nothing is clicked or typed for the person');
+  assert.equal(r.answer.ok, true);
+  assert.match(r.answer.output, /handed it to the person/);
+  assert.match(r.answer.output, /The person finished/);
+  assert.equal(r.made[1].closed, true, 'closed with the task');
+});
+
+test('"captcha": a page without a human check keeps the window as it is; a wrong value is 400', async () => {
+  const r = await runBrowserTask({ browser: true, captcha: 'handoff' }, { action: 'open', url: 'https://example.com' });
+  assert.equal(r.made.length, 1);
+  assert.equal(r.made[0].headless, true);
+  assert.equal((await post('/execute', { prompt: 'x', browser: true, captcha: 'auto' })).status, 400);
+  assert.equal((await post('/start', { prompt: 'x', captcha: 7 })).status, 400);
 });
 
 test('/start takes the same fields; wrong types are 400', async () => {

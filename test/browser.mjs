@@ -423,6 +423,142 @@ test('handoff: error "timeout" after the time is up; "stopped" when the window i
   }
 });
 
+test('"headless" in the request switches the window at any time, on the same page (GET /browser shows the state)', async () => {
+  try {
+    await post('/browser', { action: 'close' });
+    assert.deepEqual((await call('GET', '/browser')).json, { ok: true, running: false, headless: true, url: null, handoff: false });
+    await post('/browser', { action: 'open', url: 'https://example.com/a' });
+    const first = last();
+    assert.equal(first.headless, true);
+
+    // Same mode: the same window.
+    await post('/browser', { action: 'read', headless: true });
+    assert.equal(last(), first);
+
+    // Visible now: the window is started again on the page it was on.
+    const shown = await post('/browser', { action: 'read', headless: false });
+    assert.equal(shown.status, 200);
+    assert.equal(first.closed, true);
+    const second = last();
+    assert.notEqual(second, first);
+    assert.equal(second.headless, false);
+    assert.equal(second.url, 'https://example.com/a');
+    assert.deepEqual((await call('GET', '/browser')).json, { ok: true, running: true, headless: false, url: 'https://example.com/a', handoff: false });
+
+    // The choice stays for the next steps and for a window started after close.
+    await post('/browser', { action: 'read' });
+    assert.equal(last(), second);
+    await post('/browser', { action: 'close' });
+    await post('/browser', { action: 'open', url: 'https://example.com/b' });
+    assert.equal(last().headless, false);
+
+    // `open` with the other mode goes straight to its page.
+    await post('/browser', { action: 'open', url: 'https://example.com/c', headless: true });
+    assert.equal(last().headless, true);
+    assert.equal(last().url, 'https://example.com/c');
+    assert.ok(!last().calls.some((c) => c.url === 'https://example.com/b'), 'the old page is not opened first');
+
+    assert.equal((await post('/browser', { action: 'read', headless: 'no' })).status, 400);
+  } finally {
+    app.browserState.headless = undefined;
+    await post('/browser', { action: 'close' });
+  }
+});
+
+test('handoff with "headless": false shows an invisible window for the step; without it still 400', async () => {
+  try {
+    await post('/browser', { action: 'close' });
+    const open = await post('/browser', { action: 'open', url: 'https://captcha.test/check' });
+    assert.equal(open.json.handoff_needed, true);
+    assert.match(open.json.note, /"headless": false/, 'the model is told how to show the window');
+    const hidden = last();
+    assert.equal((await post('/browser', { action: 'handoff' })).status, 400);
+
+    const h = await stream('/browser', { action: 'handoff', text: 'Solve it', headless: false });
+    assert.equal(h.status, 200);
+    await until(() => h.events.length >= 1, 'the status event');
+    const shown = last();
+    assert.notEqual(shown, hidden);
+    assert.equal(shown.headless, false);
+    assert.equal(shown.url, 'https://captcha.test/check', 'on the page where the captcha is');
+    assert.equal(shown.fronted, true);
+    shown.solved = true;
+    await h.finished;
+    assert.equal(h.events.at(-1).event, 'done');
+    assert.equal((await post('/browser', { action: 'read' })).status, 200);
+    assert.equal(last(), shown, 'the window stays visible until a request says otherwise');
+  } finally {
+    app.browserState.headless = undefined;
+    await post('/browser', { action: 'close' });
+  }
+});
+
+test('"captcha": "handoff": a captcha in the way shows the window and calls the person at once (result → status → done)', async () => {
+  try {
+    await post('/browser', { action: 'close' });
+    const noticesBefore = notices.length;
+    const h = await stream('/browser', { action: 'open', url: 'https://captcha.test/check', captcha: 'handoff' });
+    assert.equal(h.status, 200);
+    await until(() => h.events.length >= 2, 'result and status');
+    assert.equal(h.events[0].event, 'result');
+    assert.equal(h.events[0].data.handoff_needed, true);
+    assert.ok(h.events[0].data.captcha.kind);
+    assert.equal(h.events[1].event, 'status');
+    assert.match(h.events[1].data.todo, /human/);
+    assert.equal(notices.length, noticesBefore + 1, 'the person is called');
+    const shown = last();
+    assert.equal(shown.headless, false, 'the window is visible');
+    assert.equal(shown.url, 'https://captcha.test/check');
+    assert.equal(shown.fronted, true);
+    shown.solved = true; // the person solves it, the server never does
+    await h.finished;
+    assert.equal(h.events.at(-1).event, 'done');
+    assert.equal(h.events.at(-1).data.how, 'done');
+    assert.ok(!shown.calls.some((c) => ['click', 'type', 'press'].includes(c.action)), 'nothing was clicked or typed');
+  } finally {
+    app.browserState.headless = undefined;
+    await post('/browser', { action: 'close' });
+  }
+});
+
+test('"captcha": "handoff" leaves alone what does not need the person now; "manual" and ASK_CAPTCHA decide the default', async () => {
+  try {
+    await post('/browser', { action: 'close' });
+    // A captcha on a form is for after the rest is filled in: a plain answer.
+    const form = await post('/browser', { action: 'open', url: 'https://captcha.test/form', captcha: 'handoff' });
+    assert.equal(form.status, 200);
+    assert.equal(form.json.handoff_needed, false);
+    assert.equal(form.json.captcha.blocking, false);
+    // plan mode never starts a hand-off.
+    const plan = await post('/browser', { action: 'open', url: 'https://captcha.test/check', captcha: 'handoff', mode: 'plan', allowedSites: ['captcha.test'] });
+    assert.equal(plan.status, 200);
+    assert.equal(plan.json.handoff_needed, true);
+    // Default is manual: the client is told, nothing starts.
+    const manual = await post('/browser', { action: 'open', url: 'https://captcha.test/check' });
+    assert.equal(manual.status, 200);
+    assert.equal(manual.json.handoff_needed, true);
+    assert.equal(app.browserState.handoff ?? null, null);
+    assert.equal(last().headless, true);
+    assert.equal((await post('/browser', { action: 'read', captcha: 'auto' })).status, 400);
+
+    // ASK_CAPTCHA=handoff is the default of every request; a request can still say manual.
+    app.config.captcha = 'handoff';
+    const viaConfig = await stream('/browser', { action: 'open', url: 'https://captcha.test/check' });
+    await until(() => viaConfig.events.length >= 2, 'result and status');
+    assert.equal(viaConfig.events[0].event, 'result');
+    last().solved = true;
+    await viaConfig.finished;
+    last().solved = false; // a new check
+    const off = await post('/browser', { action: 'open', url: 'https://captcha.test/check', captcha: 'manual' });
+    assert.equal(off.status, 200);
+    assert.equal(off.json.handoff_needed, true);
+  } finally {
+    app.config.captcha = 'manual';
+    app.browserState.headless = undefined;
+    await post('/browser', { action: 'close' });
+  }
+});
+
 test('POST /browser: a browser that cannot start → 502', async () => {
   await post('/browser', { action: 'close' });
   FakeBrowser.startError = 'There’s no Chrome, Edge, Chromium or Brave on this computer.';

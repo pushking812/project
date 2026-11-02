@@ -631,6 +631,28 @@
           }
         },
         {
+          "name": "POST /execute с browser (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"open http://localhost:3000 in the browser and tell me the page title\",\n  \"mode\": \"edits\",\n  \"browser\": true,\n  \"allowedSites\": [\"localhost\"]\n}" },
+            "url": "{{baseUrl}}/execute",
+            "description": "Нужен реальный ASK_KEY. У задачи своё окно браузера, оно закрывается вместе с ней. В mode=all открываются любые сайты, в edits и plan только из allowedSites. handoff в задаче без ASK_BROWSER_HEADLESS=0 сразу отказывает."
+          }
+        },
+        {
+          "name": "POST /execute - 400 (browser не булево)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400 bad_request', () => pm.response.to.have.status(400));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"prompt\": \"x\", \"browser\": \"yes\" }" },
+            "url": "{{baseUrl}}/execute"
+          }
+        },
+        {
           "name": "POST /browser plan + click - 403",
           "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
             "pm.test('403 plan_mode', () => { pm.response.to.have.status(403); pm.expect(pm.response.json().code).to.eql('plan_mode'); });"

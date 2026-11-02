@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
 import { createApp } from '../ask-code-server.mjs';
 import { loadConfig } from '../lib/config.mjs';
 import { resetSessions } from '../lib/sessions.mjs';
@@ -122,7 +123,34 @@ test('6. /compact replaces the history of the session', { skip }, async () => {
   assert.ok(!ev.some((e) => e.event === 'error'));
 });
 
-test('7. /model picks a listed model and /ask still works', { skip }, async () => {
+test('7. /execute with browser:true opens a local page in real Chrome', { skip }, async () => {
+  // Needs Chrome or Edge on this machine (see "chrome" in /doctor). Costs one more model request.
+  const page = createServer((req, res) => {
+    res.setHeader('content-type', 'text/html; charset=utf-8');
+    res.end('<html><head><title>Heron Page</title></head><body><h1>The code word is heron</h1></body></html>');
+  });
+  await new Promise((r) => page.listen(0, '127.0.0.1', r));
+  try {
+    const url = `http://127.0.0.1:${page.address().port}/`;
+    const r = await call('POST', '/execute', {
+      prompt: `Use the browser tool to open ${url} and tell me the code word shown on the page.`,
+      mode: 'all',
+      browser: true,
+      allowedSites: ['127.0.0.1'],
+    });
+    assert.equal(r.status, 200, r.text.slice(0, 300));
+    const ev = parseSSE(r.text);
+    note('browser events:', ev.map((e) => e.event).join(','));
+    assert.ok(!ev.some((e) => e.event === 'error'), 'error event: ' + JSON.stringify(ev.find((e) => e.event === 'error')));
+    assert.ok(ev.some((e) => e.event === 'done'), 'no done event');
+    const all = ev.map((e) => JSON.stringify(e.data)).join(' ').toLowerCase();
+    assert.ok(all.includes('heron'), 'the answer does not mention the page content: ' + all.slice(0, 400));
+  } finally {
+    await new Promise((r) => page.close(r));
+  }
+});
+
+test('8. /model picks a listed model and /ask still works', { skip }, async () => {
   const m = await call('GET', '/models');
   const first = m.json.models[0];
   const name = typeof first === 'string' ? first : first.id ?? first.name;
