@@ -232,4 +232,59 @@ test('GET /models lists the plan\'s models; POST /model picks one for the next t
   }
 });
 
+// ─── /doctor and /bug ────────────────────────────────────────────────────────────────────────────
+
+test('GET /doctor: the checks, each with name and ok; what is missing says what to do', async () => {
+  const r = await get('/doctor');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true);
+  const by = Object.fromEntries(r.json.checks.map((c) => [c.name, c]));
+  for (const name of ['Node', 'ask', 'plan', 'ImageMagick', 'poppler', 'clipboard', 'editor', 'browser', 'ASK.md']) {
+    assert.ok(by[name], `check ${name}`);
+    assert.equal(typeof by[name].ok, 'boolean');
+    if (!by[name].ok) assert.ok(by[name].fix, `${name} says how to fix it`);
+  }
+  assert.deepEqual(by.Node, { name: 'Node', ok: true, value: process.versions.node });
+  assert.deepEqual(by.ask, { name: 'ask', ok: true, value: 'reachable' });
+  assert.equal(by.plan.ok, true);
+  assert.equal(by['ASK.md'].ok, true);
+  assert.equal((await get('/doctor?folder=sub')).json.checks.find((c) => c.name === 'ASK.md').ok, false);
+  assert.equal((await get('/doctor?folder=..')).status, 400);
+});
+
+test('GET /doctor: an unreachable site is a failed check, not an error', async () => {
+  const other = createApp({ key: GOOD_KEY, site: 'http://127.0.0.1:1', root, home, host: '127.0.0.1', port: 0, mode: 'all', maxParallel: 1, logLevel: 'error' });
+  const port = await other.listen();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/doctor`);
+    assert.equal(res.status, 200);
+    const ask = (await res.json()).checks.find((c) => c.name === 'ask');
+    assert.equal(ask.ok, false);
+    assert.match(ask.fix, /ASK_SITE/);
+  } finally {
+    await other.shutdown(500);
+  }
+});
+
+test('POST /bug sends the text and versions to the site and returns the report id', async () => {
+  const before = site.requests.length;
+  const r = await post('/bug', { text: 'The browser does not open' });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json, { ok: true, id: '42' });
+  const sent = site.requests.slice(before).find((q) => q.path === '/v1/reports');
+  assert.equal(sent.body.text, 'The browser does not open');
+  assert.match(sent.body.context.app, /^ask-code-mcp\//);
+  assert.equal(sent.body.context.page, 'ask-code');
+
+  await post('/bug', { text: 'x'.repeat(5000) });
+  assert.equal(site.requests.filter((q) => q.path === '/v1/reports').at(-1).body.text.length, 2000, 'cut to 2000 characters');
+});
+
+test('POST /bug: empty text 400, a failing site 502', async () => {
+  assert.equal((await post('/bug', {})).status, 400);
+  assert.equal((await post('/bug', { text: '   ' })).status, 400);
+  assert.equal((await post('/bug', { text: 5 })).status, 400);
+  assert.equal((await post('/bug', { text: '__fail__' })).status, 502);
+});
+
 // STAGE-2E-TESTS-END

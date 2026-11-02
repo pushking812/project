@@ -20,6 +20,7 @@ import { addAppRoutes, sharedApps } from './lib/apps.mjs';
 import { addInfoRoutes } from './lib/info.mjs';
 import { addCompactRoutes } from './lib/compact.mjs';
 import { addModelRoutes } from './lib/models.mjs';
+import { addDoctorRoutes } from './lib/doctor.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
 const STOP_FORCE_MS = 8_000;
@@ -155,6 +156,7 @@ export function createApp(config) {
   addInfoRoutes(app);
   addCompactRoutes(app);
   addModelRoutes(app);
+  addDoctorRoutes(app);
 
   const handle = async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;
