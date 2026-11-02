@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { startMockSite, GOOD_KEY } from './mock-site.mjs';
 import { createApp } from '../ask-code-server.mjs';
 import { historyFile, saveHistory, loadHistory, FOLDED_MARK } from '../build/ask-code-core.mjs';
-import { resetSessions } from '../lib/sessions.mjs';
+import { resetSessions, lockSession } from '../lib/sessions.mjs';
 import { setLogLevel } from '../lib/log.mjs';
 
 let root, home, site, app, base, file;
@@ -111,6 +111,85 @@ test('GET /status: a wrong key at the site is 401', async () => {
   } finally {
     await other.shutdown(500);
   }
+});
+
+// ─── /compact ────────────────────────────────────────────────────────────────────────────────────
+
+test('POST /compact: no session 404, short task 400, bad input 400, session in use 409', async () => {
+  assert.equal((await post('/compact', { folder: 'sub' })).status, 404);
+  assert.equal((await post('/compact', { session_id: 'nope' })).status, 404);
+  assert.equal((await post('/compact', { session_id: 'a/b' })).status, 400);
+  assert.equal((await post('/compact', { focus: 5 })).status, 400);
+  assert.equal((await post('/compact', { folder: '..' })).status, 403);
+
+  const fresh = (await post('/sessions', { folder: 'sub' })).json.session_id;
+  const short = await post('/compact', { folder: 'sub', session_id: fresh });
+  assert.equal(short.status, 400);
+  assert.equal(short.json.code, 'too_short');
+
+  const id = (await get('/sessions')).json.sessions.find((s) => s.current).id;
+  const release = lockSession(app.config, root, id);
+  try {
+    const busy = await post('/compact', { session_id: id });
+    assert.equal(busy.status, 409);
+    assert.equal(busy.json.code, 'session_busy');
+  } finally {
+    release();
+  }
+  assert.equal((await loadHistory(file)).history.length, 10, 'nothing changed');
+});
+
+test('POST /compact: the site is asked for a summary of the task, which replaces it', async () => {
+  const seen = [];
+  site.setScenario(async ({ body, emit }) => {
+    seen.push(body);
+    emit('delta', { text: 'Goal: add ' });
+    emit('delta', { text: 'tests.' });
+  });
+  const r = await post('/compact', { focus: 'API details' });
+  assert.equal(r.status, 200);
+  const events = parseSSE(r.text);
+  const names = events.map((e) => e.event);
+  assert.ok(names.includes('delta'));
+  assert.ok(names.includes('usage'));
+  assert.equal(names.at(-1), 'done');
+  assert.equal(events.at(-1).data.summary, 'Goal: add tests.');
+  assert.equal(events.at(-1).data.requests, 5);
+
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].history.length, 10, 'the whole task goes to the site');
+  assert.match(seen[0].prompt, /Write a summary of this task/);
+  assert.match(seen[0].prompt, /Keep in particular: API details/);
+  assert.equal(seen[0].commands, false);
+
+  const saved = await loadHistory(file);
+  assert.deepEqual(saved.history, [
+    { role: 'user', text: FOLDED_MARK },
+    { role: 'assistant', text: 'Goal: add tests.' },
+  ]);
+  assert.equal(saved.title, 'Add tests', 'the title stays');
+  assert.deepEqual(saved.inputs, ['question 1']);
+
+  const ctx = (await get('/context')).json;
+  assert.equal(ctx.requests, 1);
+  assert.equal((await post('/compact', {})).status, 400, 'a folded task is short');
+});
+
+test('POST /compact: when the site fails, the task is as it was', async () => {
+  await saveHistory(file, turns(3), 'Add tests', []);
+  site.setScenario(async ({ emit }) => emit('error', { message: 'boom' }));
+  const failed = await post('/compact', {});
+  assert.equal(failed.status, 200);
+  const last = parseSSE(failed.text).at(-1);
+  assert.equal(last.event, 'error');
+  assert.equal((await loadHistory(file)).history.length, 6);
+
+  site.setScenario(async () => {}); // done with no text at all
+  const empty = parseSSE((await post('/compact', {})).text).at(-1);
+  assert.equal(empty.event, 'error');
+  assert.match(empty.data.message, /could not fold/);
+  assert.equal((await loadHistory(file)).history.length, 6);
+  site.setScenario(async ({ emit }) => emit('delta', { text: 'ok' }));
 });
 
 // STAGE-2E-TESTS-END
