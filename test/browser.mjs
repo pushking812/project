@@ -30,10 +30,14 @@ class FakeBrowser {
   /** What CAPTCHA_SIGNS of ask-code would see on the pages of these tests. */
   async captchaSigns() {
     const none = { frames: [], marks: 0, mark: '', solved: false, inputs: 3, text: 'Hello', words: 20 };
+    if (this.solved) return none; // the person solved the captcha in the window
     if (this.url.startsWith('https://captcha.test/check')) return { ...none, frames: ['https://challenges.cloudflare.com/cdn-cgi/challenge-platform/frame=challenge'], inputs: 0 };
     if (this.url.startsWith('https://captcha.test/form') || this.url.startsWith('http://localhost:3000/form')) return { ...none, marks: 1, mark: 'reCAPTCHA' };
     if (this.url.startsWith('https://captcha.test/solved')) return { ...none, marks: 1, mark: 'reCAPTCHA', solved: true };
     return none;
+  }
+  async front() {
+    this.fronted = true;
   }
   async here() {
     return { url: this.url, title: 'Fake page' };
@@ -87,6 +91,38 @@ const call = async (method, path, body) => {
 const post = (path, body = {}) => call('POST', path, body);
 const last = () => FakeBrowser.made.at(-1);
 
+/** POST that may answer with an event stream: the events as they arrive, and a promise for the end. */
+const stream = async (path, body, signal) => {
+  const res = await fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal });
+  const events = [];
+  if (!(res.headers.get('content-type') ?? '').includes('event-stream')) return { status: res.status, json: await res.json(), events, finished: Promise.resolve() };
+  const finished = (async () => {
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      for await (const chunk of res.body) {
+        buffer += decoder.decode(chunk, { stream: true });
+        for (let i = buffer.indexOf('\n\n'); i >= 0; i = buffer.indexOf('\n\n')) {
+          const block = buffer.slice(0, i);
+          buffer = buffer.slice(i + 2);
+          const name = /^event: (.*)$/m.exec(block);
+          const data = /^data: (.*)$/m.exec(block);
+          if (name) events.push({ event: name[1], data: JSON.parse(data[1]) });
+        }
+      }
+    } catch {}
+  })();
+  return { status: res.status, events, finished };
+};
+const until = async (check, what, ms = 3000) => {
+  const start = Date.now();
+  while (!check()) {
+    if (Date.now() - start > ms) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+};
+const notices = [];
+
 before(async () => {
   setLogLevel('error');
   root = mkdtempSync(join(tmpdir(), 'ask-br-'));
@@ -94,6 +130,9 @@ before(async () => {
   writeFileSync(join(root, '.env'), 'TOKEN=super-secret');
   app = createApp({ key: KEY, site: 'http://127.0.0.1:1', root, host: '127.0.0.1', port: 0, mode: 'all', maxParallel: 2, logLevel: 'error' });
   app.makeBrowser = (config, opts) => new FakeBrowser(opts);
+  app.notify = (ctx, kind, title, body) => notices.push({ kind, title, body, key: ctx.key });
+  app.config.handoffPollMs = 20;
+  app.config.handoffMs = 5000;
   base = `http://127.0.0.1:${await app.listen()}`;
 });
 
@@ -276,6 +315,112 @@ test('POST /browser: a captcha on the page is reported; one in the way asks for 
   assert.equal(local.json.captcha.local, true);
   assert.equal(local.json.handoff_needed, false, 'on the own dev server: test keys, no hand-off');
   assert.match(local.json.note, /test keys/);
+});
+
+test('handoff in headless mode is 400 headless_handoff, in plan mode 403 (criterion 28)', async () => {
+  await post('/browser', { action: 'close' });
+  const r = await post('/browser', { action: 'handoff', text: 'Solve the captcha' });
+  assert.equal(r.status, 400);
+  assert.equal(r.json.code, 'headless_handoff');
+  assert.equal(r.json.ok, false);
+  assert.equal((await post('/browser', { action: 'handoff', mode: 'plan' })).status, 403);
+  assert.equal(notices.length, 0, 'nobody is called for a hand-off that cannot work');
+});
+
+test('handoff: SSE status → delta → done once the captcha is solved (criterion 27)', async () => {
+  app.config.browserHeadless = false;
+  try {
+    await post('/browser', { action: 'close' });
+    const open = await post('/browser', { action: 'open', url: 'https://captcha.test/check' });
+    assert.equal(open.json.handoff_needed, true);
+    const b = last();
+    assert.equal(b.headless, false);
+
+    const h = await stream('/browser', { action: 'handoff', text: 'Solve the captcha' });
+    assert.equal(h.status, 200);
+    await until(() => h.events.length >= 1, 'the status event');
+    assert.deepEqual(h.events[0], { event: 'status', data: { state: 'waiting', todo: 'Solve the captcha' } });
+    assert.equal(notices.at(-1).body, 'Solve the captcha');
+    assert.equal(notices.at(-1).key, KEY, 'the notice goes to the site with the key (not into the answer)');
+    assert.equal(b.fronted, true, 'the window is brought to the front');
+
+    // The window is the person's now.
+    const busy = await post('/browser', { action: 'read' });
+    assert.equal(busy.status, 409);
+    assert.equal(busy.json.code, 'handoff_active');
+    assert.equal((await post('/browser', { action: 'handoff' })).status, 409);
+
+    b.url = 'https://captcha.test/check?step=2';
+    await until(() => h.events.some((e) => e.event === 'delta'), 'a delta');
+    assert.match(h.events.find((e) => e.event === 'delta').data.text, /step=2/);
+
+    b.solved = true;
+    await h.finished;
+    const done = h.events.at(-1);
+    assert.equal(done.event, 'done');
+    assert.equal(done.data.how, 'done');
+    assert.match(done.data.answer, /The person finished: Solve the captcha/);
+    assert.match(done.data.answer, /Now at: https:\/\/captcha\.test\/check\?step=2/);
+    assert.ok(done.data.images.length, 'a screenshot after');
+    assert.ok(!JSON.stringify(h.events).includes(KEY));
+
+    assert.equal(app.browserState.handoff, null);
+    assert.equal((await post('/browser', { action: 'read' })).status, 200, 'the window is Ask’s again');
+  } finally {
+    app.config.browserHeadless = true;
+  }
+});
+
+test('handoff without a captcha: done when told (POST /browser/handoff/done); 409 when none waits', async () => {
+  assert.equal((await post('/browser/handoff/done', {})).status, 409);
+  app.config.browserHeadless = false;
+  try {
+    await post('/browser', { action: 'close' });
+    await post('/browser', { action: 'open', url: 'https://example.com' });
+    const h = await stream('/browser', { action: 'handoff', text: 'Type the code from your phone' });
+    await until(() => h.events.length >= 1, 'the status event');
+    assert.equal((await post('/browser/handoff/done', { note: 7 })).status, 400);
+    assert.equal((await post('/browser/handoff/done', { note: 'code entered' })).status, 200);
+    await h.finished;
+    const done = h.events.at(-1);
+    assert.equal(done.event, 'done');
+    assert.equal(done.data.how, 'said');
+    assert.match(done.data.answer, /The person says: code entered/);
+  } finally {
+    app.config.browserHeadless = true;
+  }
+});
+
+test('handoff: error "timeout" after the time is up; "stopped" when the window is closed; a client that leaves frees the window', async () => {
+  app.config.browserHeadless = false;
+  try {
+    await post('/browser', { action: 'close' });
+    await post('/browser', { action: 'open', url: 'https://example.com' });
+
+    app.config.handoffMs = 150;
+    const late = await stream('/browser', { action: 'handoff' });
+    await late.finished;
+    assert.deepEqual(late.events.at(-1), { event: 'error', data: { message: 'timeout' } });
+    assert.equal(app.browserState.handoff, null);
+    app.config.handoffMs = 5000;
+
+    const waiting = await stream('/browser', { action: 'handoff' });
+    await until(() => waiting.events.length >= 1, 'the status event');
+    assert.equal((await post('/browser', { action: 'close' })).status, 200);
+    await waiting.finished;
+    assert.deepEqual(waiting.events.at(-1), { event: 'error', data: { message: 'stopped' } });
+
+    await post('/browser', { action: 'open', url: 'https://example.com' });
+    const aborter = new AbortController();
+    const gone = await stream('/browser', { action: 'handoff' }, aborter.signal);
+    await until(() => gone.events.length >= 1, 'the status event');
+    aborter.abort();
+    await until(() => app.browserState.handoff === null, 'the hand-off to end');
+    assert.equal((await post('/browser', { action: 'read' })).status, 200);
+  } finally {
+    app.config.browserHeadless = true;
+    app.config.handoffMs = 5000;
+  }
 });
 
 test('POST /browser: a browser that cannot start → 502', async () => {
