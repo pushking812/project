@@ -11,7 +11,7 @@ export const GOOD_KEY = 'sk-ask-test-good';
 export async function startMockSite({ scenario } = {}) {
   const requests = [];
   const runs = new Map();
-  const state = { scenario: scenario ?? (async ({ emit }) => emit('delta', { text: 'ok' })) };
+  const state = { scenario: scenario ?? (async ({ emit }) => emit('delta', { text: 'ok' })), me: { name: 'Tester', plan: 'plus', code: true, models: ['claude-sonnet'], limits: null } };
 
   const json = (res, status, value) => {
     res.writeHead(status, { 'content-type': 'application/json' });
@@ -30,7 +30,8 @@ export async function startMockSite({ scenario } = {}) {
     requests.push({ method: req.method, path: url.pathname, body, key: bearer });
 
     if (bearer !== GOOD_KEY) return json(res, 401, { error: { code: 'bad_key', message: 'The key is wrong.' } });
-    if (req.method === 'GET' && url.pathname === '/v1/me') return json(res, 200, { name: 'Tester', plan: 'plus', code: true, models: ['claude-sonnet'], limits: null });
+    if (req.method === 'GET' && url.pathname === '/v1/me') return json(res, 200, state.me);
+    if (req.method === 'POST' && url.pathname === '/v1/reports') return json(res, body.text === '__fail__' ? 500 : 200, body.text === '__fail__' ? { error: { message: 'down' } } : { id: '42' });
 
     if (req.method === 'POST' && url.pathname === '/v1/code') {
       if (body.prompt === '__quota__') return json(res, 429, { error: { code: 'quota_exceeded', message: 'Quota used up.' } });
@@ -87,6 +88,8 @@ export async function startMockSite({ scenario } = {}) {
     url: `http://127.0.0.1:${server.address().port}`,
     requests,
     setScenario: (fn) => (state.scenario = fn),
+    /** Replaces the answer of GET /v1/me. */
+    setMe: (me) => (state.me = me),
     close: () => new Promise((r) => (server.closeAllConnections(), server.close(r))),
   };
 }

@@ -19,6 +19,7 @@ import { addWatchRoutes } from './lib/watches.mjs';
 import { addAppRoutes, sharedApps } from './lib/apps.mjs';
 import { addInfoRoutes } from './lib/info.mjs';
 import { addCompactRoutes } from './lib/compact.mjs';
+import { addModelRoutes } from './lib/models.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
 const STOP_FORCE_MS = 8_000;
@@ -153,6 +154,7 @@ export function createApp(config) {
   addAppRoutes(app);
   addInfoRoutes(app);
   addCompactRoutes(app);
+  addModelRoutes(app);
 
   const handle = async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;

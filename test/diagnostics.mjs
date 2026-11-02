@@ -192,4 +192,44 @@ test('POST /compact: when the site fails, the task is as it was', async () => {
   site.setScenario(async ({ emit }) => emit('delta', { text: 'ok' }));
 });
 
+// ─── /models and /model ──────────────────────────────────────────────────────────────────────────
+
+const PLAN_ME = { name: 'Tester', plan: 'plus', code: true, models: ['claude-sonnet-5-5', 'claude-opus-5'], limits: null };
+
+test('GET /models lists the plan\'s models; POST /model picks one for the next tasks', async () => {
+  site.setMe(PLAN_ME);
+  try {
+    const list = await get('/models');
+    assert.equal(list.status, 200);
+    assert.deepEqual(list.json, { ok: true, models: ['claude-sonnet-5-5', 'claude-opus-5'], current: null });
+
+    assert.equal((await post('/model', {})).status, 400);
+    const bad = await post('/model', { name: 'gpt' });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.json.code, 'unknown_model');
+    assert.match(bad.json.error?.message ?? bad.json.message ?? bad.text, /sonnet-5-5, opus-5/);
+    assert.equal((await get('/models')).json.current, null, 'a refused name changes nothing');
+
+    const set = await post('/model', { name: 'opus' });
+    assert.equal(set.status, 200);
+    assert.deepEqual(set.json, { ok: true, model: 'claude-opus-5' });
+    assert.equal((await get('/models')).json.current, 'claude-opus-5');
+    assert.equal((await get('/status')).json.model, 'claude-opus-5');
+
+    const seen = [];
+    site.setScenario(async ({ body, emit }) => {
+      seen.push(body.model);
+      emit('delta', { text: 'ok' });
+    });
+    assert.equal((await post('/execute', { prompt: 'hi' })).status, 200);
+    assert.deepEqual(seen, ['claude-opus-5'], 'the task asks the site for that model');
+
+    assert.equal((await post('/model', { name: 'claude-sonnet-5-5' })).json.model, 'claude-sonnet-5-5', 'full names work');
+  } finally {
+    app.config.model = null;
+    site.setMe({ name: 'Tester', plan: 'plus', code: true, models: ['claude-sonnet'], limits: null });
+    site.setScenario(async ({ emit }) => emit('delta', { text: 'ok' }));
+  }
+});
+
 // STAGE-2E-TESTS-END
