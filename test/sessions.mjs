@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startMockSite, GOOD_KEY } from './mock-site.mjs';
 import { createApp } from '../ask-code-server.mjs';
+import { historyFile, saveHistory } from '../build/ask-code-core.mjs';
 import { resetSessions } from '../lib/sessions.mjs';
 import { setLogLevel } from '../lib/log.mjs';
 
@@ -70,4 +71,68 @@ test('/sessions: bad title and folders outside the project are refused', async (
   assert.equal((await get('/sessions?folder=..')).status, 400);
   assert.equal((await get('/sessions?folder=nope')).status, 404);
   assert.equal((await get('/sessions?folder=sub')).json.sessions.length, 0);
+});
+
+// ─── resume, read, export (sessions seeded on disk the way ask-code saves them) ──────────────────
+
+const seed = async (id, title, turns) => {
+  const own = historyFile(site.url, root, home);
+  const file = id === 'own' ? own : join(own.replace(/\.json$/, ''), `${id}.json`);
+  const history = turns.flatMap((t) => [{ role: 'user', text: t }, { role: 'assistant', text: `answer to ${t}` }]);
+  await saveHistory(file, history, title, turns);
+};
+
+test('GET /sessions/:id: history, title, inputs; 404 and 400', async () => {
+  await seed('old-one', 'Fix bug', ['fix the bug', 'and the test']);
+  const r = await get('/sessions/old-one');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.title, 'Fix bug');
+  assert.equal(r.json.history.length, 4);
+  assert.deepEqual(r.json.inputs, ['fix the bug', 'and the test']);
+  assert.ok(r.json.savedAt);
+  assert.equal((await get('/sessions/nope')).status, 404);
+  assert.equal((await get('/sessions/a.b')).status, 400);
+  const listed = (await get('/sessions')).json.sessions.find((s) => s.id === 'old-one');
+  assert.equal(listed.requests, 2);
+  assert.equal(listed.current, false);
+});
+
+test('POST /sessions/resume: switches the current session; 409 when it already is; 404; 400', async () => {
+  const r = await post('/sessions/resume', { id: 'old-one' });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.session_id, 'old-one');
+  assert.equal(r.json.title, 'Fix bug');
+  assert.equal(r.json.history.length, 4);
+  assert.deepEqual((await get('/sessions')).json.sessions.filter((s) => s.current).map((s) => s.id), ['old-one']);
+  assert.equal((await post('/sessions/resume', { id: 'old-one' })).status, 409);
+  assert.equal((await post('/sessions/resume', { id: 'missing' })).status, 404);
+  assert.equal((await post('/sessions/resume', {})).status, 400);
+  assert.equal((await post('/sessions/resume', { id: '../x' })).status, 400);
+  assert.equal((await post('/sessions/resume', { id: 'old-one', folder: '..' })).status, 403);
+});
+
+test('POST /sessions/:id/export: writes Markdown, never over a file; plan, secrets, outside and unknown are refused', async () => {
+  const r = await post('/sessions/old-one/export', { filename: 'notes.md' });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.path, 'notes.md');
+  const md = readFileSync(join(root, 'notes.md'), 'utf8');
+  assert.match(md, /^# Fix bug/);
+  assert.match(md, /\*\*You:\*\* fix the bug/);
+  assert.match(md, /\*\*Ask:\*\* answer to and the test/);
+
+  const again = await post('/sessions/old-one/export', { filename: 'notes.md' });
+  assert.equal(again.status, 409);
+  assert.equal(again.json.code, 'file_exists');
+
+  const auto = await post('/sessions/old-one/export', {});
+  assert.equal(auto.status, 200);
+  assert.match(auto.json.path, /^ask-code-\d{4}-\d\d-\d\d-\d\d-\d\d\.md$/);
+
+  assert.equal((await post('/sessions/old-one/export', { filename: 'x.md', mode: 'plan' })).status, 403);
+  assert.equal((await post('/sessions/old-one/export', { filename: '.env' })).status, 403);
+  assert.equal((await post('/sessions/old-one/export', { filename: '../../x.md' })).status, 403);
+  assert.equal((await post('/sessions/nope/export', {})).status, 404);
+  const empty = await post('/sessions');
+  assert.equal((await post(`/sessions/${empty.json.session_id}/export`, {})).status, 400);
+  assert.ok(!existsSync(join(root, '.env')));
 });
