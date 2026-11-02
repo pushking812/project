@@ -2,9 +2,11 @@
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { loadConfig, VERSION } from './lib/config.mjs';
-import { log, setLogLevel, setLogSecret } from './lib/log.mjs';
-import { HttpError, sendError, sendJson } from './lib/errors.mjs';
-import { fetchMe } from './lib/ask-proxy.mjs';
+import { log, brief, setLogLevel, setLogSecret } from './lib/log.mjs';
+import { HttpError, sendError, sendJson, readJson } from './lib/errors.mjs';
+import { fetchMe, askStream } from './lib/ask-proxy.mjs';
+import { pipeSSE, logged } from './lib/sse.mjs';
+import { buildContext } from './lib/context.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
 
@@ -35,6 +37,17 @@ export function createApp(config) {
     const aborter = new AbortController();
     res.on('close', () => aborter.abort());
     sendJson(res, 200, await fetchMe(config, aborter.signal));
+  });
+
+  route('POST', /^\/ask$/, async (req, res) => {
+    const { prompt, useContext = true } = await readJson(req);
+    if (typeof prompt !== 'string' || !prompt.trim()) throw new HttpError(400, 'prompt must be a non-empty string');
+    if (typeof useContext !== 'boolean') throw new HttpError(400, 'useContext must be true or false');
+    const aborter = new AbortController();
+    res.on('close', () => aborter.abort());
+    const { memoryDir, ...context } = useContext ? await buildContext(config) : {};
+    log('debug', 'ask', `/ask prompt=${brief(prompt, 60)} context=${useContext}`);
+    await pipeSSE(res, logged('ask', askStream(config, { prompt, ...context }, aborter.signal)));
   });
 
   const handle = async (req, res) => {
