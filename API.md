@@ -4,8 +4,9 @@
 решения и отклонения от ТЗ.
 
 HTTP/SSE server around `ask-code`: it runs ask tasks (model, tool calls, files, commands, memory) for a project folder.
-Stage 1: tasks (`/ask`, `/execute`, `/start`, `/status`, `/stop`). Stage 2 so far: direct file and command endpoints (2A),
-notes and memory (2B), sessions (2C). Browser endpoints (2D) and later are not done yet.
+Stage 1: tasks (`/ask`, `/execute`, `/start`, `/status`, `/stop`). Stage 2: direct file and command endpoints (2A),
+notes and memory (2B), sessions (2C), browser (2Г), watches and apps (2Д), context, compact, model, diagnostics (2Е).
+Short stage 2 reference with `curl` examples: [docs/api-stage2.md](docs/api-stage2.md).
 The Python MCP layer (stage 1, commits 10–15) talks to this API; it is not part of this package yet.
 
 ## Install and run
@@ -15,7 +16,7 @@ Needs Node ≥ 18 and an ask key (plan Plus+). No npm dependencies.
 ```bash
 export ASK_KEY=sk-ask-...      # Windows cmd: set ASK_KEY=...
 npm start                      # patches vendor/ask-code.mjs into build/ask-code-core.mjs, then starts the server
-npm test                       # 37 integration tests against a stand-in for the ask site (no key needed)
+npm test                       # 79 integration tests against a stand-in for the ask site (no key needed)
 ```
 
 `vendor/ask-code.mjs` is a byte-for-byte copy of the monolith and is never edited. `build/patch.mjs` adds `export` to
@@ -748,8 +749,11 @@ lib/mock-input.mjs    answers doTool's questions by rule
 lib/direct.mjs        helpers of stage 2 (folder, mode, refusals → HTTP)  lib/files.mjs    2A: /read /list /search /write /edit /command
 lib/memory.mjs        2B: /notes /remember /memory                        lib/sessions.mjs 2C: session store    lib/session-routes.mjs  /sessions*
 lib/browser.mjs       2Г: /browser, handoff
-build/patch.mjs       exports api/events/doTool
-test/                 integration.mjs, executor.test.mjs, stage2.mjs, sessions.mjs, browser.mjs, mock-site.mjs
+lib/watches.mjs       2Д: /watches        lib/apps.mjs  2Д: /apps
+build/patch.mjs       exports api/events/doTool and more
+docs/api-stage2.md    stage 2 reference with curl examples
+test/                 integration.mjs, executor.test.mjs, stage2.mjs, sessions.mjs, browser.mjs, watches.mjs,
+                      diagnostics.mjs, security.mjs, mock-site.mjs
 test/browser-real.mjs real Chrome/Edge smoke test (npm run test:browser)
 ```
 
