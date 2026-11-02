@@ -75,18 +75,22 @@ export function createApp(config) {
 
   /** Reads and checks the body of /execute and /start. */
   const readTaskBody = async (req) => {
-    const { prompt, mode = config.mode, session_id: sessionId } = await readJson(req);
+    const { prompt, mode = config.mode, session_id: sessionId, browser = false, allowedSites } = await readJson(req);
     if (typeof prompt !== 'string' || !prompt.trim()) throw new HttpError(400, 'prompt must be a non-empty string');
     if (!MODES.includes(mode)) throw new HttpError(400, `mode must be one of ${MODES.join(', ')}`);
     if (sessionId !== undefined) checkSessionId(sessionId);
-    return { prompt, mode, sessionId };
+    if (typeof browser !== 'boolean') throw new HttpError(400, 'browser must be true or false', 'bad_request');
+    if (allowedSites !== undefined && (!Array.isArray(allowedSites) || allowedSites.some((s) => typeof s !== 'string'))) {
+      throw new HttpError(400, 'allowedSites must be a list of host names', 'bad_request');
+    }
+    return { prompt, mode, sessionId, browser, allowedSites: (allowedSites ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean) };
   };
 
   /** A task record. With a session_id the session is taken for it (409 when a task already runs in it). */
-  const createTask = ({ prompt, mode, sessionId }) => {
+  const createTask = ({ prompt, mode, sessionId, browser, allowedSites }) => {
     const release = sessionId ? lockSession(config, config.root, sessionId) : null;
     try {
-      const rec = registry.create({ prompt, mode, sessionId: sessionId ?? null }); // 429 when MAX_PARALLEL tasks run
+      const rec = registry.create({ prompt, mode, sessionId: sessionId ?? null, browser, allowedSites }); // 429 when MAX_PARALLEL tasks run
       rec.release = release;
       return rec;
     } catch (e) {
@@ -101,7 +105,7 @@ export function createApp(config) {
     res.on('close', () => {
       if (rec.status === 'running') rec.abort.abort();
     });
-    await executeTask({ rec, config, onEvent: ({ event, data }) => writeEvent(res, event, data), deps: { Apps: AppsClass } });
+    await executeTask({ rec, config, onEvent: ({ event, data }) => writeEvent(res, event, data), deps: { Apps: AppsClass, ...(app.makeBrowser ? { makeBrowser: app.makeBrowser } : {}) } });
     if (!res.writableEnded) res.end();
   });
 
@@ -114,7 +118,7 @@ export function createApp(config) {
       if (e.status === 429) log('warn', 'tasks', `max parallel reached (${config.maxParallel}), rejecting`);
       throw e;
     }
-    executeTask({ rec, config, deps: { Apps: AppsClass } }).catch((e) => log('error', 'tasks', `${rec.id} crashed: ${e.message}`));
+    executeTask({ rec, config, deps: { Apps: AppsClass, ...(app.makeBrowser ? { makeBrowser: app.makeBrowser } : {}) } }).catch((e) => log('error', 'tasks', `${rec.id} crashed: ${e.message}`));
     sendJson(res, 200, { taskId: rec.id, status: 'running' });
   });
 

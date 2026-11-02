@@ -70,7 +70,7 @@ H='content-type: application/json'
 | 32 | `GET /doctor` | 2Е | диагностика |
 | 33 | `POST /bug` | 2Е | отчёт об ошибке |
 
-Кроме того, `/execute` и `/start` принимают `session_id` (см. 2C).
+Кроме того, `/execute` и `/start` принимают `session_id` (см. 2C), `browser` (булево: у задачи своё окно браузера) и `allowedSites` (см. 2Г).
 
 ## 2A. Файлы и команды
 

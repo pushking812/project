@@ -16,7 +16,7 @@ Needs Node ≥ 18 and an ask key (plan Plus+). No npm dependencies.
 ```bash
 export ASK_KEY=sk-ask-...      # Windows cmd: set ASK_KEY=...
 npm start                      # patches vendor/ask-code.mjs into build/ask-code-core.mjs, then starts the server
-npm test                       # 79 integration tests against a stand-in for the ask site (no key needed)
+npm test                       # 85 integration tests against a stand-in for the ask site (no key needed)
 ```
 
 `vendor/ask-code.mjs` is a byte-for-byte copy of the monolith and is never edited. `build/patch.mjs` adds `export` to
@@ -270,6 +270,13 @@ data: {"message":"..."}
 | `prompt` | string | да | текст задачи |
 | `mode` | `all` \| `edits` \| `plan` | нет, по умолчанию `ASK_MODE` | режим работы агента |
 | `session_id` | string | нет | сессия, которую задача продолжает (см. «Сессии»); без него задача без истории |
+| `browser` | boolean | нет, по умолчанию `false` | `true` даёт задаче собственное окно браузера: модель получает инструмент `browser` (как `/browser`). Окно запускается при первом шаге и закрывается вместе с задачей |
+| `allowedSites` | string[] | нет | хосты, которые модель может открывать без `mode: "all"` (как в `/browser`). В `edits` и `plan` остальные сайты отклоняются, спросить некого |
+
+В `plan` браузер только смотрит (открыть, прочитать, скриншот, прокрутка). Ввод пароля или карты отклоняется. Капчу
+модель сама не решает. `handoff` в задаче работает только при `ASK_BROWSER_HEADLESS=0`, иначе инструмент сразу отвечает
+отказом, а не ждёт человека 8 минут. Это окно не то же, что у `POST /browser`: у каждой задачи своё. Неверный тип
+`browser` или `allowedSites` — `400 bad_request`.
 
 До начала потока возможны `400`, `409` (`session_busy`) и `429` (JSON). Дальше — события:
 
@@ -296,7 +303,7 @@ curl -N -X POST http://127.0.0.1:8737/execute -H 'content-type: application/json
 Та же задача, что `/execute`, но в фоне: ответ приходит сразу, ход работы читается через `/status`. Обрыв соединения
 задачу **не** останавливает — только `/stop`.
 
-Тело — такое же, как у `/execute` (`prompt`, `mode`, необязательный `session_id`). Ответ `200`:
+Тело — такое же, как у `/execute` (`prompt`, `mode`, необязательные `session_id`, `browser`, `allowedSites`). Ответ `200`:
 
 ```json
 { "taskId": "3f2b8c1e-9a4d-4e57-b6a1-0c7d5e8f1a23", "status": "running" }
@@ -796,7 +803,7 @@ test/browser-real.mjs real Chrome/Edge smoke test (npm run test:browser)
 - Нет флага `--no-sandbox` (класс `AskBrowser` из ask-code его не принимает): в контейнере от root Chrome может не запуститься.
 - Шаг, превысивший 30 с, отвечает `504`, но сам в браузере может ещё завершиться.
 - Safari проверен только чтением кода; на Mac без Chrome он берётся автоматически.
-- `browser` в `/execute` пока не подключён (поле тела `browser` из ТЗ §6.6 не обрабатывается).
+- `browser` в `/execute` и `/start` подключён, но окно у каждой задачи своё, а не общее с `POST /browser`. Проверено на подставных сайте и браузере; с настоящим сайтом и Chrome вручную не пробовалось.
 
 ## Известные ограничения
 
