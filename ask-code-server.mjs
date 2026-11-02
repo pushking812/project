@@ -11,6 +11,7 @@ import { TaskRegistry } from './lib/tasks.mjs';
 import { executeTask } from './lib/executor.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
+const SWEEP_MS = 5 * 60 * 1000;
 
 /**
  * Builds the server (does not listen yet).
@@ -127,15 +128,35 @@ export function createApp(config) {
     });
   });
 
+  let sweepTimer = null;
+
   /** @returns {Promise<number>} the port it listens on */
   app.listen = () =>
     new Promise((resolve, reject) => {
       app.server.once('error', reject);
       app.server.listen(config.port, config.host, () => {
         app.server.off('error', reject);
+        sweepTimer = setInterval(() => {
+          const n = registry.sweep();
+          if (n) log('debug', 'tasks', `removed ${n} old task(s)`);
+        }, SWEEP_MS);
+        sweepTimer.unref();
         resolve(app.server.address().port);
       });
     });
+
+  // On shutdown: abort every task, stop their apps, give them a moment to end as "stopped".
+  app.onShutdown.push(async () => {
+    clearInterval(sweepTimer);
+    registry.abortAll();
+    for (const rec of registry.tasks.values()) {
+      try {
+        rec.ctx?.apps.stopAll();
+      } catch {}
+    }
+    const until = Date.now() + SHUTDOWN_GRACE_MS / 2;
+    while (registry.running > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+  });
 
   /** Aborts the tasks, waits for requests in flight (up to the grace time), closes the server. */
   app.shutdown = async (graceMs = SHUTDOWN_GRACE_MS) => {
