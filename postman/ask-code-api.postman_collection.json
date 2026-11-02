@@ -1,0 +1,561 @@
+{
+  "info": {
+    "name": "ask-code API",
+    "description": "HTTP/SSE API ask-code-server (этапы 1 и 2A-2C). Запустите сервер (npm start) и импортируйте коллекцию. Этап 1: Health, Me, Ask, Execute, Start -> Status -> Stop (taskId сохраняется автоматически). Этап 2: файлы, заметки и память, сессии (sessionId сохраняется после POST /sessions). Запросы /ask, /execute, /start требуют реальный ключ ASK_KEY.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8737" },
+    { "key": "taskId", "value": "" },
+    { "key": "sessionId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Этап 1: задачи",
+      "item": [
+        {
+          "name": "GET /health",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('ok=true', () => pm.expect(pm.response.json().ok).to.eql(true));",
+            "pm.test('keyPresent', () => pm.expect(pm.response.json().keyPresent).to.eql(true));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/health" }
+        },
+        {
+          "name": "GET /me",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/me" }
+        },
+        {
+          "name": "POST /ask (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"what is in ASK.md? One line.\",\n  \"useContext\": true\n}" },
+            "url": "{{baseUrl}}/ask",
+            "description": "Поток событий: delta, usage, done | error. Postman покажет поток после завершения ответа."
+          }
+        },
+        {
+          "name": "POST /ask - 400 (пустой prompt)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400', () => pm.response.to.have.status(400));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"prompt\": \"\" }" },
+            "url": "{{baseUrl}}/ask"
+          }
+        },
+        {
+          "name": "POST /execute (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"create hello.txt with the text Hello\",\n  \"mode\": \"all\"\n}" },
+            "url": "{{baseUrl}}/execute",
+            "description": "Поток: status, delta, tool, usage, done | error. mode: all | edits | plan."
+          }
+        },
+        {
+          "name": "POST /execute - 400 (неверный mode)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400', () => pm.response.to.have.status(400));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"prompt\": \"x\", \"mode\": \"bogus\" }" },
+            "url": "{{baseUrl}}/execute"
+          }
+        },
+        {
+          "name": "POST /start",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('taskId + running', () => { pm.expect(j.taskId).to.be.a('string'); pm.expect(j.status).to.eql('running'); });",
+            "pm.collectionVariables.set('taskId', j.taskId);"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"create hello.txt with the text Hello\",\n  \"mode\": \"all\"\n}" },
+            "url": "{{baseUrl}}/start",
+            "description": "429, если уже идёт ASK_MAX_PARALLEL задач."
+          }
+        },
+        {
+          "name": "GET /status/:taskId",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('status valid', () => pm.expect(['running','done','error','stopped']).to.include(pm.response.json().status));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/status/{{taskId}}" }
+        },
+        {
+          "name": "POST /stop/:taskId",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('status valid', () => pm.expect(['stopping','done','error','stopped']).to.include(pm.response.json().status));"
+          ] } }],
+          "request": { "method": "POST", "url": "{{baseUrl}}/stop/{{taskId}}" }
+        },
+        {
+          "name": "GET /status/unknown - 404",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/status/no-such-id" }
+        },
+        {
+          "name": "GET /nope - 404",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/nope" }
+        },
+        {
+          "name": "DELETE /health - 405",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('405', () => pm.response.to.have.status(405));"
+          ] } }],
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/health" }
+        }
+      ]
+    },
+    {
+      "name": "Этап 2A: файлы и команды",
+      "description": "Прямые операции без модели, ключ ASK_KEY для них не нужен (кроме старта сервера).",
+      "item": [
+        {
+          "name": "POST /write (hello-postman.txt)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 или 409 (файл уже есть)', () => pm.expect([200, 409]).to.include(pm.response.code));",
+            "if (pm.response.code === 200) pm.test('есть diff', () => pm.expect(pm.response.json().diff).to.be.an('array'));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"path\": \"hello-postman.txt\",\n  \"content\": \"Hello\\nWorld\\n\",\n  \"overwrite\": false\n}" },
+            "url": "{{baseUrl}}/write",
+            "description": "overwrite:false - 409 exists, если файл уже есть. Запустите запрос второй раз, чтобы увидеть 409."
+          }
+        },
+        {
+          "name": "POST /read",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('ok + output', () => { const j = pm.response.json(); pm.expect(j.ok).to.eql(true); pm.expect(j.output).to.be.a('string'); });"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"path\": \"hello-postman.txt\", \"offset\": 1, \"limit\": 20 }" },
+            "url": "{{baseUrl}}/read"
+          }
+        },
+        {
+          "name": "POST /edit",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 или 409 (фрагмента уже нет)', () => pm.expect([200, 409]).to.include(pm.response.code));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"path\": \"hello-postman.txt\", \"old_text\": \"World\", \"new_text\": \"Postman\" }" },
+            "url": "{{baseUrl}}/edit",
+            "description": "409 old_text_not_found, если World уже заменено."
+          }
+        },
+        {
+          "name": "POST /list",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"path\": \"\", \"depth\": 1 }" },
+            "url": "{{baseUrl}}/list"
+          }
+        },
+        {
+          "name": "POST /search",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"pattern\": \"Hello\", \"regex\": false }" },
+            "url": "{{baseUrl}}/search"
+          }
+        },
+        {
+          "name": "POST /command",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('ok', () => pm.expect(pm.response.json().ok).to.eql(true));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"command\": \"node -v\", \"timeout_sec\": 20 }" },
+            "url": "{{baseUrl}}/command"
+          }
+        },
+        {
+          "name": "POST /read .env - 403",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('403 secret', () => { pm.response.to.have.status(403); pm.expect(pm.response.json().code).to.eql('secret'); });"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"path\": \".env\" }" },
+            "url": "{{baseUrl}}/read"
+          }
+        },
+        {
+          "name": "POST /read ../ - 403",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('403 outside', () => { pm.response.to.have.status(403); pm.expect(pm.response.json().code).to.eql('outside'); });"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"path\": \"../../../etc/passwd\" }" },
+            "url": "{{baseUrl}}/read"
+          }
+        },
+        {
+          "name": "POST /write mode=plan - 403",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('403 plan_mode', () => { pm.response.to.have.status(403); pm.expect(pm.response.json().code).to.eql('plan_mode'); });"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"path\": \"x.txt\", \"content\": \"x\", \"mode\": \"plan\" }" },
+            "url": "{{baseUrl}}/write"
+          }
+        },
+        {
+          "name": "POST /command mode=plan - 403",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('403 plan_mode', () => { pm.response.to.have.status(403); pm.expect(pm.response.json().code).to.eql('plan_mode'); });"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"command\": \"node -v\", \"mode\": \"plan\" }" },
+            "url": "{{baseUrl}}/command"
+          }
+        },
+        {
+          "name": "POST /command cat .env - 403",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('403 secret_command', () => { pm.response.to.have.status(403); pm.expect(pm.response.json().code).to.eql('secret_command'); });"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"command\": \"type .env\" }" },
+            "url": "{{baseUrl}}/command"
+          }
+        },
+        {
+          "name": "POST /read - 400 (нет path)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400', () => pm.response.to.have.status(400));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{baseUrl}}/read"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Этап 2B: заметки и память",
+      "item": [
+        {
+          "name": "POST /remember",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('ok', () => pm.expect(pm.response.json().ok).to.eql(true));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"note\": \"postman check: tests run with npm test\" }" },
+            "url": "{{baseUrl}}/remember",
+            "description": "Дописывает строку в ASK.md проекта."
+          }
+        },
+        {
+          "name": "GET /notes",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('text + sources', () => { const j = pm.response.json(); pm.expect(j.text).to.be.a('string'); pm.expect(j.sources).to.be.an('array'); });"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/notes" }
+        },
+        {
+          "name": "POST /memory (запись темы)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"topic\": \"postman.md\", \"content\": \"# Postman\\nLine one\\n\" }" },
+            "url": "{{baseUrl}}/memory"
+          }
+        },
+        {
+          "name": "POST /memory (правка темы)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 или 409', () => pm.expect([200, 409]).to.include(pm.response.code));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"topic\": \"postman.md\", \"old_text\": \"Line one\", \"new_text\": \"Line two\" }" },
+            "url": "{{baseUrl}}/memory"
+          }
+        },
+        {
+          "name": "GET /memory",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('topics', () => pm.expect(pm.response.json().topics).to.be.an('array'));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/memory" }
+        },
+        {
+          "name": "GET /memory/postman.md",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('text', () => pm.expect(pm.response.json().text).to.be.a('string'));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/memory/postman.md" }
+        },
+        {
+          "name": "GET /memory/nope.md - 404",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/memory/nope.md" }
+        },
+        {
+          "name": "POST /memory - 400 (плохое имя темы)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400', () => pm.response.to.have.status(400));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"topic\": \"../x.md\", \"content\": \"x\" }" },
+            "url": "{{baseUrl}}/memory"
+          }
+        },
+        {
+          "name": "POST /remember mode=plan - 403",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('403', () => pm.response.to.have.status(403));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"note\": \"x\", \"mode\": \"plan\" }" },
+            "url": "{{baseUrl}}/remember"
+          }
+        },
+        {
+          "name": "DELETE /memory?mode=plan - 403",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('403', () => pm.response.to.have.status(403));"
+          ] } }],
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/memory?mode=plan" }
+        },
+        {
+          "name": "DELETE /memory?mode=all (очистка)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/memory?mode=all",
+            "description": "Стирает всю память Ask об этой папке."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Этап 2C: сессии",
+      "description": "Порядок: создать сессию (sessionId сохраняется) -> список -> задача в сессии -> просмотр -> export -> resume. Для /execute и /start нужен реальный ASK_KEY.",
+      "item": [
+        {
+          "name": "POST /sessions (создать)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('session_id', () => pm.expect(j.session_id).to.be.a('string'));",
+            "pm.collectionVariables.set('sessionId', j.session_id);"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"title\": \"postman demo\" }" },
+            "url": "{{baseUrl}}/sessions"
+          }
+        },
+        {
+          "name": "GET /sessions",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const list = pm.response.json().sessions;",
+            "pm.test('sessions - массив', () => pm.expect(list).to.be.an('array'));",
+            "pm.test('наша сессия в списке', () => pm.expect(list.map(s => s.id)).to.include(pm.collectionVariables.get('sessionId')));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/sessions" }
+        },
+        {
+          "name": "POST /execute в сессии (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"create session-note.txt with the text one\",\n  \"mode\": \"all\",\n  \"session_id\": \"{{sessionId}}\"\n}" },
+            "url": "{{baseUrl}}/execute",
+            "description": "Перед done приходит event: session {session_id, requests, title}. Вторая такая же задача, пока идёт первая, даёт 409 session_busy."
+          }
+        },
+        {
+          "name": "POST /execute в той же сессии (продолжение)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"in the file you just made, change one to two\",\n  \"mode\": \"all\",\n  \"session_id\": \"{{sessionId}}\"\n}" },
+            "url": "{{baseUrl}}/execute",
+            "description": "Модель получает историю сессии, поэтому знает, о каком файле речь. В event: session requests станет 2."
+          }
+        },
+        {
+          "name": "POST /start в сессии",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('taskId', pm.response.json().taskId);"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"what did I ask you before? One line.\",\n  \"mode\": \"plan\",\n  \"session_id\": \"{{sessionId}}\"\n}" },
+            "url": "{{baseUrl}}/start",
+            "description": "Дальше GET /status/{{taskId}}: в ответе будет session_id. 409 session_busy, если в сессии ещё идёт задача."
+          }
+        },
+        {
+          "name": "GET /status/:taskId (session_id)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.test('session_id совпадает', () => pm.expect(pm.response.json().session_id).to.eql(pm.collectionVariables.get('sessionId')));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/status/{{taskId}}" }
+        },
+        {
+          "name": "GET /sessions/:id",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('history - массив', () => pm.expect(j.history).to.be.an('array'));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/sessions/{{sessionId}}" }
+        },
+        {
+          "name": "POST /sessions/:id/export",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200, 400 (пустая сессия) или 409 (файл уже есть)', () => pm.expect([200, 400, 409]).to.include(pm.response.code));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"filename\": \"session-export.md\" }" },
+            "url": "{{baseUrl}}/sessions/{{sessionId}}/export",
+            "description": "Пишет Markdown в папку проекта. Существующий файл не перезаписывается (409 file_exists), пустая сессия - 400 empty_session."
+          }
+        },
+        {
+          "name": "POST /sessions/resume",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 или 409 (уже текущая)', () => pm.expect([200, 409]).to.include(pm.response.code));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"id\": \"{{sessionId}}\" }" },
+            "url": "{{baseUrl}}/sessions/resume",
+            "description": "Делает сессию текущей. Если она уже текущая - 409 already_current. Чтобы увидеть 200, создайте вторую сессию и вернитесь к первой."
+          }
+        },
+        {
+          "name": "POST /sessions/resume - 404",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"id\": \"no-such-session\" }" },
+            "url": "{{baseUrl}}/sessions/resume"
+          }
+        },
+        {
+          "name": "GET /sessions/unknown - 404",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/sessions/no-such-session" }
+        },
+        {
+          "name": "GET /sessions/bad id - 400",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400 bad_session_id', () => { pm.response.to.have.status(400); pm.expect(pm.response.json().code).to.eql('bad_session_id'); });"
+          ] } }],
+          "request": { "method": "GET", "url": "{{baseUrl}}/sessions/bad%20id" }
+        },
+        {
+          "name": "POST /execute - 400 (плохой session_id)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400', () => pm.response.to.have.status(400));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"prompt\": \"x\", \"session_id\": \"bad id!\" }" },
+            "url": "{{baseUrl}}/execute"
+          }
+        },
+        {
+          "name": "POST /sessions/:id/export mode=plan - 403",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('403 plan_mode', () => { pm.response.to.have.status(403); pm.expect(pm.response.json().code).to.eql('plan_mode'); });"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"filename\": \"x.md\", \"mode\": \"plan\" }" },
+            "url": "{{baseUrl}}/sessions/{{sessionId}}/export"
+          }
+        }
+      ]
+    }
+  ]
+}

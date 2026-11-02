@@ -1,0 +1,36 @@
+event: status
+data: {"state":"thinking"}
+
+event: status
+data: {"state":"starting"}
+
+event: status
+data: {"state":"thinking"}
+
+event: tool
+data: {"name":"write_file","ok":true,"callId":"948"}
+
+event: status
+data: {"state":"writing"}
+
+event: delta
+data: {"text":"I created `hello.txt"}
+
+event: delta
+data: {"text":"` in the project folder."}
+
+event: delta
+data: {"text":" It contains the text \"H"}
+
+event: delta
+data: {"text":"ello\". I didn't run any"}
+
+event: delta
+data: {"text":" commands."}
+
+event: usage
+data: {"input":9025,"output":117}
+
+event: done
+data: {"steps":["wrote hello.txt"],"answer":"I created `hello.txt` in the project folder. It contains the text \"Hello\". I didn't run any commands."}
+

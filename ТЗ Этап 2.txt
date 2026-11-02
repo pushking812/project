@@ -1,0 +1,828 @@
+# Техническое задание: Этап 2 (остальные эндпоинты Node API)
+
+**Проект:** ask-code-mcp
+**Дата:** 2026-11-02
+**Версия документа:** 1.0
+**Зависит от:** Этап 1 (7 эндпоинтов: `/health`, `/me`, `/ask`, `/execute`, `/start`, `/status/:id`, `/stop/:id`)
+
+---
+
+## 1. Цель этапа
+
+Расширить Node HTTP/SSE API до полного покрытия функционала `ask-code.mjs`, чтобы Python MCP-слой (этап 3) мог экспонировать все инструменты без прямого доступа к монолиту.
+
+Этап 2 добавляет **~30 эндпоинтов**, сгруппированных в 6 подэтапов (2А–2Е). Каждый подэтап — независимый, backward-compatible с этапом 1.
+
+---
+
+## 2. Границы этапа
+
+### Входит
+
+- Прямой доступ к файлам (read/list/search/write/edit).
+- Выполнение команд.
+- Память Ask (`.ask-memory/`) и заметки (`ASK.md`).
+- Сессии: persistence истории, list/resume/export.
+- Браузер (Chrome/Edge/Safari) через HTTP.
+- Watches и Apps (фоновые процессы).
+- Context/status/compact/model, диагностика.
+- Политика `mode` для write-операций.
+
+### Не входит
+
+- Аутентификация HTTP API (только `127.0.0.1`).
+- Интерактивные подтверждения через `/confirm` — этап 3 (если понадобится).
+- MCP-обёртка (Python) — этап 3.
+- Web UI.
+
+---
+
+## 3. Общие требования
+
+### 3.1. Политика `mode`
+
+Глобальный режим: `ASK_MODE` (env, default `all`). Переопределяется в теле запроса полем `mode` для write-операций.
+
+| Режим | Файлы (write/edit) | Команды | Браузер (внешние сайты) |
+|-------|---------------------|---------|--------------------------|
+| `all` (default) | без вопросов | без вопросов, **кроме** `touchesSecret` | без вопросов |
+| `edits` | без вопросов | без вопросов, **кроме** `touchesSecret` | по `allowedSites` |
+| `plan` | `403` | `403` | только `open`/`read`/`screenshot`/`scroll`/`console`/`back`/`viewport` |
+
+Секретные команды (`touchesSecret`) блокируются всегда, кроме `mode=ask` (этап 3).
+
+### 3.2. Единый формат ответов
+
+**Успех:**
+```json
+{
+  "ok": true,
+  "output": "string",
+  "shown": "string",
+  "...": "дополнительные поля (diff, images, note, ...)"
+}
+```
+
+**Ошибка:**
+```json
+{ "ok": false, "error": "string", "code": "string" }
+```
+HTTP-код: `400` (валидация), `403` (политика), `404` (не найдено), `409` (конфликт), `429` (лимит), `500` (внутренняя).
+
+### 3.3. SSE для долгих операций
+
+| Эндпоинт | Формат |
+|----------|--------|
+| `POST /command` | sync (ждёт завершения, до `timeout_sec`, default 120s, max 600s) |
+| `POST /browser` (кроме `handoff`) | sync (до 30s) |
+| `POST /browser` (`handoff`) | SSE (`delta`, `done`, `error`) — ждёт человека |
+| `POST /compact` | SSE (`delta`, `usage`, `done`, `error`) |
+| `POST /execute` | SSE (как в этапе 1) |
+| `POST /ask` | SSE (как в этапе 1) |
+
+### 3.4. Обратная совместимость
+
+Все эндпоинты этапа 1 не меняют контракт. Добавляются только новые поля (например, `session_id` в `/execute` — опционально).
+
+---
+
+## 4. Подэтап 2А: Файлы и команды
+
+### 4.1. `POST /read`
+
+**Тело:**
+```json
+{ "path": "src/app.js", "offset": 1, "limit": 2000 }
+```
+
+**Ответ:**
+```json
+{ "ok": true, "output": "...", "note": "PDF, pages: 5", "images": [...] }
+```
+
+`note` и `images` — опционально (для PDF/картинок/Office).
+
+**Поведение:** `runReadTool(ROOT, 'read_file', {path, offset, limit})`.
+
+**Ошибки:** `400` (нет `path`), `403` (секрет), `404` (нет файла), `500`.
+
+### 4.2. `POST /list`
+
+**Тело:**
+```json
+{ "path": "src/", "depth": 2 }
+```
+
+**Ответ:**
+```json
+{ "ok": true, "output": "src/app.js\nsrc/lib/util.js\n..." }
+```
+
+**Поведение:** `runReadTool(ROOT, 'list_files', {path, depth})`.
+
+### 4.3. `POST /search`
+
+**Тело:**
+```json
+{ "pattern": "TODO", "path": "src/", "regex": false }
+```
+
+**Ответ:**
+```json
+{ "ok": true, "output": "src/app.js:42: // TODO: fix\n..." }
+```
+
+**Поведение:** `runReadTool(ROOT, 'search', {pattern, path, regex})`.
+
+### 4.4. `POST /write`
+
+**Тело:**
+```json
+{ "path": "src/new.js", "content": "console.log(1)", "mode": "all" }
+```
+
+**Ответ:**
+```json
+{ "ok": true, "output": "Wrote src/new.js (1 lines).", "shown": "...", "diff": [{"kind":"+","text":"console.log(1)"}] }
+```
+
+**Поведение:**
+- `planChange(ROOT, 'write_file', {path, content})`.
+- Проверка `mode`: `plan` → `403`.
+- Запись через `applyChange(change, 'write_file')`.
+- `diff` — из `lineDiff(change.before, change.after)`, до 120 строк.
+
+**Ошибки:** `403` (секрет/plan), `409` (файл существует и `overwrite: false` — новое поле, default `true`).
+
+### 4.5. `POST /edit`
+
+**Тело:**
+```json
+{ "path": "src/app.js", "old_text": "let x = 1", "new_text": "let x = 2", "mode": "all" }
+```
+
+**Ответ:** как `/write`, но `output: "Edited src/app.js."`.
+
+**Поведение:** `planChange(ROOT, 'edit_file', {path, old_text, new_text})` + `applyChange`. `applyEdit` уже обрабатывает `old_text` не найден / неоднозначен / пустой — возвращает `Refused` с понятным сообщением.
+
+**Ошибки:** `400` (нет полей), `403`, `404`, `409` (не найден/неоднозначен `old_text`).
+
+### 4.6. `POST /command`
+
+**Тело:**
+```json
+{ "command": "npm test", "timeout_sec": 120, "mode": "all" }
+```
+
+**Ответ:**
+```json
+{ "ok": true, "output": "$ npm test\n...", "shown": "(exit code 0)", "code": 0 }
+```
+
+**Поведение:**
+- Проверка `hasControl(command)` → `400` с `code: "control_chars"`.
+- Проверка `touchesSecret(command)` → `403` с `code: "secret_command"` (всегда, кроме `mode=ask` — этап 3).
+- Проверка `mode=plan` → `403`.
+- `runCommand(ROOT, {command, timeout_sec}, {apps: ctx.apps})`.
+- Если команда — фоновое приложение (заканчивается на `&` или печатает localhost) — возвращается `{ok, app: n, url}`.
+
+**Ошибки:** `400`, `403`, `408` (timeout, `code: "timeout"`), `500`.
+
+---
+
+## 5. Подэтап 2Б: Память и заметки
+
+### 5.1. `GET /notes`
+
+**Query:** `?folder=/path` (опционально, default `ROOT`).
+
+**Ответ:**
+```json
+{ "ok": true, "text": "# Notes for Ask\n...", "sources": [{"where": "ASK.md", "chars": 1234}], "clipped": false }
+```
+
+**Поведение:** `gatherNotes(folder)`.
+
+**Ошибки:** `400` (папка вне `ROOT` — `inside()`), `500`.
+
+### 5.2. `POST /remember`
+
+**Тело:**
+```json
+{ "note": "тесты запускаются через npm test", "folder": "/path" }
+```
+
+**Ответ:**
+```json
+{ "ok": true, "output": "Saved in ASK.md." }
+```
+
+**Поведение:** `remember(folder, note)`.
+
+**Ошибки:** `400`, `403` (путь вне папки), `500`.
+
+### 5.3. `GET /memory`
+
+**Query:** `?folder=/path` (опционально).
+
+**Ответ:**
+```json
+{
+  "ok": true,
+  "index": "## Project\nNode 22...",
+  "topics": ["project.md", "decisions.md"],
+  "dir": "/home/user/.config/ask-code/memory/abc123"
+}
+```
+
+**Поведение:** `readMemory(memoryDir(SITE, folder))` + список `.md` файлов.
+
+### 5.4. `GET /memory/:topic`
+
+**Ответ:**
+```json
+{ "ok": true, "text": "## Project\n..." }
+```
+
+**Поведение:** прочитать `memoryDir/<topic>.md`.
+
+**Ошибки:** `404` (нет файла), `400` (не `.md`).
+
+### 5.5. `POST /memory`
+
+**Тело (запись):**
+```json
+{ "topic": "project.md", "content": "## Project\n...", "mode": "all" }
+```
+
+**Тело (редактирование):**
+```json
+{ "topic": "project.md", "old_text": "...", "new_text": "...", "mode": "all" }
+```
+
+**Ответ:**
+```json
+{ "ok": true, "output": "Saved .ask-memory/project.md." }
+```
+
+**Поведение:** `memoryTool(memoryDir, 'write_file'|'edit_file', {path: '.ask-memory/'+topic, ...})`.
+- Ограничения: только `.md`, ≤40 000 символов, ≤100 файлов.
+- `mode=plan` → `403`.
+
+**Ошибки:** `400` (не `.md`, превышение), `403`, `404` (при edit), `409`.
+
+### 5.6. `DELETE /memory`
+
+**Ответ:**
+```json
+{ "ok": true, "output": "Cleared." }
+```
+
+**Поведение:** `rm(memoryDir, {recursive: true})`. Требует `mode=all` (иначе `403`).
+
+---
+
+## 6. Подэтап 2В: Сессии и персистентность
+
+**Важно:** меняет контракт `/execute` и `/start` — добавляет опциональный `session_id`. Если не указан — stateless (как в этапе 1).
+
+### 6.1. `GET /sessions`
+
+**Query:** `?folder=/path` (опционально).
+
+**Ответ:**
+```json
+{
+  "ok": true,
+  "sessions": [
+    {"id": "abc", "title": "Add tests", "requests": 5, "savedAt": "2026-11-02T10:00:00Z", "current": true},
+    {"id": "def", "title": "Fix bug", "requests": 3, "savedAt": "2026-11-01T15:30:00Z", "current": false}
+  ]
+}
+```
+
+**Поведение:** `listSessions(historyFile(SITE, folder))`.
+
+### 6.2. `POST /sessions`
+
+**Тело:** `{ "folder": "/path", "title": "..." }` (title опционально).
+
+**Ответ:** `{ "ok": true, "session_id": "..." }`.
+
+**Поведение:** создать новую сессию (`newSession` + новый `historyFile`), вернуть `id` (basename файла без `.json`).
+
+### 6.3. `POST /sessions/resume`
+
+**Тело:** `{ "folder": "/path", "id": "abc" }`.
+
+**Ответ:** `{ "ok": true, "history": [...], "title": "...", "inputs": [...] }`.
+
+**Поведение:** `resumeSession(historyFile, chosen)`.
+
+**Ошибки:** `404` (нет сессии), `409` (уже текущая).
+
+### 6.4. `GET /sessions/:id`
+
+**Ответ:** `{ "ok": true, "history": [...], "title": "...", "inputs": [...], "savedAt": "..." }`.
+
+**Ошибки:** `404`.
+
+### 6.5. `POST /sessions/:id/export`
+
+**Тело:** `{ "filename": "notes.md" }` (опционально).
+
+**Ответ:** `{ "ok": true, "path": "notes.md" }`.
+
+**Поведение:** `exportTask` (запись в папку, без перезаписи).
+
+**Ошибки:** `409` (файл существует).
+
+### 6.6. Изменения в `/execute` и `/start`
+
+**Тело `/execute`:**
+```json
+{ "prompt": "...", "mode": "all", "session_id": "abc", "browser": false }
+```
+
+**Поведение:**
+- Если `session_id` указан — загрузить `history` из `historyFile(session_id)`, после задачи — сохранить.
+- Если нет — stateless (`history: []`), как этап 1.
+- Ответ SSE дополняется событием `session` с `{session_id, requests, title}`.
+
+**Тело `/start`:** то же.
+
+**Ответ `/status/:id`:** добавляется поле `session_id` (если была сессия).
+
+---
+
+## 7. Подэтап 2Г: Браузер
+
+Самый сложный подэтап. Требует рефакторинга `handOff`/`withCaptcha` под неблокирующий стиль (в CLI они блокировались на `Input.ask`, в HTTP — нет).
+
+### 7.1. `POST /browser`
+
+**Тело:**
+```json
+{
+  "action": "open",
+  "url": "https://example.com",
+  "selector": "text=Book now",
+  "x": 100, "y": 200,
+  "text": "hello",
+  "key": "Enter",
+  "dy": 600,
+  "width": 1280, "height": 860,
+  "allowedSites": ["example.com"],
+  "mode": "all"
+}
+```
+
+**Ответ:**
+```json
+{
+  "ok": true,
+  "output": "Now at: https://example.com\nTitle: ...",
+  "images": [{"mediaType": "image/jpeg", "data": "..."}],
+  "captcha": {"kind": "reCAPTCHA", "blocking": true},
+  "handoff_needed": false,
+  "private": false
+}
+```
+
+**Действия:**
+- `open` — открыть URL (проверка `refusedUrl`, `allowedSites`).
+- `screenshot` — снимок окна.
+- `click` — по `selector` (CSS или `text=…`) или по `x`/`y`.
+- `type` — ввод текста (проверка `PRIVATE_FIELD` → `private: true`).
+- `press` — клавиша.
+- `scroll` — `dy`.
+- `read` — текст страницы + ссылки + поля.
+- `console` — ошибки консоли.
+- `back`.
+- `viewport` — эмуляция размера (телефон/десктоп).
+- `close`.
+- `handoff` — SSE, ждёт человека (см. §7.2).
+
+**Поведение:**
+- Lazy init `AskBrowser` (headless) или `SafariBrowser` (macOS) при первом вызове.
+- `ctx.browser` — per-session (в памяти, до `close` или `SIGINT`).
+- `allowedSites` — список хостов, разрешённых без `mode=all`.
+- `mode=plan` — только `open`/`read`/`screenshot`/`scroll`/`console`/`back`/`viewport`.
+
+**Ошибки:** `400`, `403` (`private`, `refusedUrl`, `plan`), `502` (браузер не запустился), `504` (таймаут действия).
+
+### 7.2. `POST /browser` с `action: "handoff"`
+
+**Тело:** `{ "action": "handoff", "text": "Solve the captcha" }`.
+
+**Ответ:** SSE-поток:
+```
+event: status
+data: {"state":"waiting","todo":"Solve the captcha"}
+
+event: delta
+data: {"text":"..."}  // по мере того, что делает человек
+
+event: done
+data: {"answer":"..."}
+
+event: error
+data: {"message":"timeout"}  // если 8 минут прошло
+```
+
+**Поведение:** неблокирующий аналог `handOff`:
+- Открывает окно (`bringToFront`), шлёт уведомление (`POST /v1/code/call`).
+- Поллит `captchaSigns()` каждые 2 с.
+- Если капча решена — `done` + скриншот.
+- Если 8 мин — `error: "timeout"`.
+
+**Ограничение:** в headless-режиме `handoff` не работает (человек не видит окно) → `400` с `code: "headless_handoff"`.
+
+---
+
+## 8. Подэтап 2Д: Watches и Apps
+
+### 8.1. `GET /watches`
+
+**Ответ:**
+```json
+{
+  "ok": true,
+  "watches": [
+    {"id": 1, "target": "https://example.com", "url": "https://example.com", "everyMs": 300000, "checks": 10, "alerts": 2, "wanted": "available", "error": null}
+  ]
+}
+```
+
+**Поведение:** `ctx.watches.list` (создаётся lazy при первом `/watches`).
+
+### 8.2. `POST /watches`
+
+**Тело:** `{ "spec": "https://example.com every 5m for \"available\"" }`.
+
+**Ответ:** `{ "ok": true, "id": 1, "target": "...", "everyMs": 300000, "wanted": "available" }`.
+
+**Поведение:** `parseWatch(spec)` + `watches.add(spec)`. Браузер должен быть включён (`ctx.browser`), иначе `400` с `code: "browser_off"`.
+
+**Ошибки:** `400` (невалидный spec, browser off).
+
+### 8.3. `DELETE /watches/:id`
+
+**Ответ:** `{ "ok": true }`.
+
+**Ошибки:** `404`.
+
+### 8.4. `DELETE /watches`
+
+**Ответ:** `{ "ok": true, "output": "All watches stopped." }`.
+
+### 8.5. `GET /apps`
+
+**Ответ:**
+```json
+{
+  "ok": true,
+  "apps": [
+    {"n": 1, "command": "npm run dev", "url": "http://localhost:5173", "running": true}
+  ]
+}
+```
+
+**Поведение:** `ctx.apps.running()`.
+
+### 8.6. `DELETE /apps/:n`
+
+**Ответ:** `{ "ok": true }`.
+
+**Ошибки:** `404`.
+
+### 8.7. `DELETE /apps`
+
+**Ответ:** `{ "ok": true, "output": "Stopped everything." }`.
+
+---
+
+## 9. Подэтап 2Е: Context, compact, model, диагностика
+
+### 9.1. `GET /context`
+
+**Query:** `?folder=/path&session_id=abc` (опционально).
+
+**Ответ:**
+```json
+{
+  "ok": true,
+  "tokens": {
+    "task": 1234,
+    "notes": 500,
+    "memory": 300,
+    "env": 150
+  },
+  "contextLeft": 85,
+  "requests": 5
+}
+```
+
+**Поведение:** `taskTokens`, `estimateTokens`, `contextLeft`, `gatherNotes`, `readMemory`, `folderNow`.
+
+### 9.2. `GET /status`
+
+**Ответ:**
+```json
+{
+  "ok": true,
+  "site": "https://ask.oryxml.com",
+  "account": "user@example.com",
+  "plan": "plus",
+  "model": "claude-sonnet-5-5",
+  "folder": "/path",
+  "mode": "all",
+  "task": {"title": "Add tests", "requests": 5},
+  "memory": {"chars": 300, "topics": ["project.md"]},
+  "notes": {"sources": [{"where": "ASK.md", "chars": 1234}], "clipped": false}
+}
+```
+
+**Поведение:** аналог CLI `/status`.
+
+### 9.3. `POST /compact`
+
+**Тело:** `{ "folder": "/path", "session_id": "abc", "focus": "API details" }` (focus опционально).
+
+**Ответ:** SSE:
+```
+event: delta
+data: {"text":"Цель: ..."}
+
+event: usage
+data: {"input":...,"output":...}
+
+event: done
+data: {"summary":"...","requests":5}
+
+event: error
+data: {"message":"..."}
+```
+
+**Поведение:** `quietAsk` + замена `history` на `[FOLDED_MARK, summary]` + `saveHistory`.
+
+**Ошибки:** `400` (мало ходов, `< 4`), `404` (нет сессии).
+
+### 9.4. `GET /models`
+
+**Ответ:**
+```json
+{ "ok": true, "models": ["claude-sonnet-5-5", "claude-opus-5"], "current": "claude-sonnet-5-5" }
+```
+
+**Поведение:** `GET /v1/me` → `models`.
+
+### 9.5. `POST /model`
+
+**Тело:** `{ "name": "sonnet" }`.
+
+**Ответ:** `{ "ok": true, "model": "claude-sonnet-5-5" }`.
+
+**Поведение:** `pickModel(me, name)` + установка в `ctx.state.model` для последующих задач.
+
+**Ошибки:** `400` (модель не в плане).
+
+### 9.6. `GET /doctor`
+
+**Ответ:**
+```json
+{
+  "ok": true,
+  "checks": [
+    {"name": "Node", "ok": true, "value": "22.10.0"},
+    {"name": "ask", "ok": true, "value": "reachable"},
+    {"name": "ImageMagick", "ok": false, "fix": "install ImageMagick"},
+    {"name": "poppler", "ok": true},
+    {"name": "clipboard", "ok": true},
+    {"name": "editor", "ok": false, "fix": "set $EDITOR"},
+    {"name": "ASK.md", "ok": true}
+  ]
+}
+```
+
+**Поведение:** аналог CLI `/doctor`.
+
+### 9.7. `POST /bug`
+
+**Тело:** `{ "text": "..." }`.
+
+**Ответ:** `{ "ok": true, "id": "123" }`.
+
+**Поведение:** `POST /v1/reports` с контекстом (`ask-code/${VERSION}`, платформа, Node).
+
+**Ошибки:** `400` (пусто), `502`.
+
+---
+
+## 10. План коммитов
+
+Каждый коммит — самодостаточный, проходит свои тесты, не ломает этап 1.
+
+### Подэтап 2А (файлы и команды)
+
+| # | Сообщение | Что | Тест |
+|---|-----------|-----|------|
+| 16 | `feat(server): POST /read, /list, /search` | Обёртки `runReadTool` | `curl /read` с `src/app.js` → текст; `/read` с `.env` → `403`; `/search` с `TODO` → строки |
+| 17 | `feat(server): POST /write, /edit with mode policy` | `planChange`+`applyChange` + `lineDiff` | `/write` создаёт файл; `mode=plan` → `403`; `/edit` с неверным `old_text` → `409` |
+| 18 | `feat(server): POST /command` | `runCommand` + проверки | `/command npm test` → вывод; `/command cat .env` → `403`; `/command "echo $(rm -rf /)"` → контроль символов |
+
+### Подэтап 2Б (память и заметки)
+
+| # | Сообщение | Что | Тест |
+|---|-----------|-----|------|
+| 19 | `feat(server): GET /notes, POST /remember` | `gatherNotes`, `remember` | `/notes` → текст; `/remember` → файл обновился |
+| 20 | `feat(server): GET /memory, GET /memory/:topic` | `readMemory`, чтение тем | `/memory` → индекс + topics; `/memory/project.md` → текст |
+| 21 | `feat(server): POST /memory, DELETE /memory` | `memoryTool` + `rm` | `/memory` запись → файл; `mode=plan` → `403`; `DELETE` → папка пуста |
+
+### Подэтап 2В (сессии)
+
+| # | Сообщение | Что | Тест |
+|---|-----------|-----|------|
+| 22 | `feat(server): session registry, GET /sessions, POST /sessions` | `listSessions`, `newSession` | `POST /sessions` → `session_id`; `GET /sessions` → 1 сессия |
+| 23 | `feat(server): POST /sessions/resume, GET /sessions/:id, export` | `resumeSession`, `exportTask` | `resume` → history; `export` → файл |
+| 24 | `feat(server): session_id in /execute and /start` | `historyFile`, `keep`, `saveHistory` | `/execute` с `session_id` → history растёт; `/status` содержит `session_id` |
+
+### Подэтап 2Г (браузер)
+
+| # | Сообщение | Что | Тест |
+|---|-----------|-----|------|
+| 25 | `feat(server): browser lifecycle, POST /browser (open/read/screenshot/close)` | `AskBrowser`/`SafariBrowser`, lazy init, `close` | `/browser open` → скриншот; `/browser read` → текст; `/browser close` |
+| 26 | `feat(server): POST /browser (click/type/press/scroll/back/viewport)` | Действия | `/click text=...`, `/type`, `/press Enter`, `/viewport 375` |
+| 27 | `feat(server): POST /browser (console), captcha/handoff detection` | `captchaOn`, `PRIVATE_FIELD` | `/click` → `captcha.blocking`; `/type` в пароль → `private: true` |
+| 28 | `feat(server): POST /browser handoff (SSE)` | Неблокирующий `handOff` | `/handoff` → SSE; headless → `400` |
+
+### Подэтап 2Д (watches, apps)
+
+| # | Сообщение | Что | Тест |
+|---|-----------|-----|------|
+| 29 | `feat(server): watches (GET/POST/DELETE)` | `Watches`, `parseWatch` | `POST /watches` → id; `GET` → список; `DELETE` → пусто |
+| 30 | `feat(server): apps (GET/DELETE)` | `Apps` | `/execute npm run dev &` → app; `GET /apps` → список; `DELETE /apps/1` |
+
+### Подэтап 2Е (context, compact, model, diagnostics)
+
+| # | Сообщение | Что | Тест |
+|---|-----------|-----|------|
+| 31 | `feat(server): GET /context, GET /status` | `taskTokens`, `contextLeft`, `gatherNotes`, `readMemory` | `/context` → токены; `/status` → все поля |
+| 32 | `feat(server): POST /compact` | `quietAsk`, `FOLDED_MARK` | `/compact` → SSE, история сжалась |
+| 33 | `feat(server): GET /models, POST /model` | `pickModel` | `/models` → список; `/model sonnet` → переключение |
+| 34 | `feat(server): GET /doctor, POST /bug` | `doctor`, `bug` | `/doctor` → checks; `/bug` → `{id}` |
+
+### Финализация
+
+| # | Сообщение | Что | Тест |
+|---|-----------|-----|------|
+| 35 | `test(server): integration tests for stage 2` | Все эндпоинты 2А–2Е | `npm test` зелёный |
+| 36 | `docs: stage 2 API reference` | `docs/api-stage2.md`, обновление README | Следование docs → рабочая установка |
+
+**Итого:** 21 коммит (16–36). Оценка — **7–9 дней** (браузер — самый долгий, 2–3 дня).
+
+---
+
+## 11. Критерии приёмки этапа 2
+
+### Файлы и команды
+
+1. `/read` с `src/app.js` → содержимое.
+2. `/read` с `.env` → `403` `code: "secret"`.
+3. `/read` с `../../../etc/passwd` → `403` `code: "outside"`.
+4. `/write` создаёт файл, возвращает `diff`.
+5. `/write` с `mode=plan` → `403`.
+6. `/edit` с неверным `old_text` → `409` `code: "old_text_not_found"`.
+7. `/command npm test` → вывод, `code: 0`.
+8. `/command cat .env` → `403` `code: "secret_command"`.
+9. `/command "echo $(rm -rf /)"` → `400` `code: "control_chars"`.
+
+### Память и заметки
+
+10. `/notes` → текст `ASK.md`.
+11. `/remember "тест"` → файл обновился.
+12. `/memory` → индекс + topics.
+13. `/memory/project.md` → текст.
+14. `POST /memory` запись → файл создан; `mode=plan` → `403`.
+15. `DELETE /memory` → папка пуста.
+
+### Сессии
+
+16. `POST /sessions` → `session_id`.
+17. `GET /sessions` → список с текущей.
+18. `/execute` с `session_id` → history растёт после каждого запроса.
+19. `GET /sessions/:id` → history, title, inputs.
+20. `POST /sessions/resume` → переключение.
+21. `POST /sessions/:id/export` → файл в папке.
+
+### Браузер
+
+22. `/browser open https://example.com` → скриншот, `output`.
+23. `/browser read` → текст, ссылки, поля.
+24. `/browser click text=...` → переход, скриншот.
+25. `/browser type` в пароль → `private: true`.
+26. `/browser` с капчей → `captcha.blocking: true`.
+27. `/browser handoff` → SSE, `done` после решения.
+28. `/browser` в headless + `handoff` → `400` `code: "headless_handoff"`.
+29. `/browser` с внешним сайтом без `allowedSites` и `mode!=all` → `403`.
+
+### Watches и Apps
+
+30. `POST /watches` → id; `GET` → список; `DELETE` → пусто.
+31. `/execute npm run dev &` → `app: 1`; `GET /apps` → список; `DELETE /apps/1` → пусто.
+
+### Context, compact, model, diagnostics
+
+32. `/context` → токены по слоям, `contextLeft`.
+33. `/status` → все поля.
+34. `/compact` → история = `[FOLDED_MARK, summary]`.
+35. `/models` → список; `/model sonnet` → переключение.
+36. `/doctor` → checks; `/bug` → `{id}`.
+
+### Безопасность (сводно)
+
+37. `ASK_KEY` не появляется в ответах, логах, дочерних процессах.
+38. Все эндпоинты на `127.0.0.1`.
+39. `mode=plan` блокирует все write-операции.
+40. `touchesSecret` блокирует секретные команды всегда.
+
+---
+
+## 12. Риски и митигация
+
+| Риск | Вероятность | Влияние | Митигация |
+|------|-------------|---------|-----------|
+| `handoff` в headless не работает | Высокая | Среднее | `400` с понятным `code`; в README — рекомендация headful для капч |
+| Chrome не запускается в контейнере | Средняя | Высокое | `--no-sandbox` опционально; документация по Docker |
+| Safari требует AppleScript-разрешений | Средняя | Среднее | `safariProblem()` возвращает понятную ошибку; fallback на Chrome |
+| Persistence сессий ломает этап 1 | Низкая | Высокое | `session_id` опционален; без него — stateless как раньше |
+| `lineDiff` на больших файлах тормозит | Низкая | Низкое | Уже есть limit 4M; в API — до 120 строк diff |
+| Watches в API без браузера | Средняя | Низкое | `400` `code: "browser_off"` с инструкцией |
+| Cline не поддерживает SSE для `/handoff` | Низкая | Среднее | Fallback: polling `/browser/status` (этап 3) |
+| Race в `ctx.browser` при параллельных `/browser` | Средняя | Среднее | Один `ctx.browser` на процесс + mutex (`async-mutex` или самописный) |
+
+---
+
+## 13. Definition of Done этапа 2
+
+- [ ] Все 21 коммит (16–36) смёржены.
+- [ ] `npm test` — зелёный (все критерии приёмки §11).
+- [ ] Все эндпоинты этапа 1 не сломаны (regression-тесты).
+- [ ] `docs/api-stage2.md` описывает все 30 эндпоинтов с примерами `curl`.
+- [ ] README обновлён: новые env-переменные, примеры, troubleshooting.
+- [ ] Браузер работает в headless (Chrome) и headful (Chrome/Safari).
+- [ ] `handoff` корректно возвращает `400` в headless.
+- [ ] Persistence сессий работает: `/execute` с `session_id` продолжает историю.
+- [ ] `mode=plan` блокирует все write-операции.
+- [ ] Нет `console.log` в Node.
+- [ ] `ASK_KEY` не утекает.
+
+---
+
+## 14. Оценка
+
+| Подэтап | Коммиты | Оценка |
+|---------|---------|--------|
+| 2А (файлы, команды) | 16–18 | 1.5 дня |
+| 2Б (память, заметки) | 19–21 | 1 день |
+| 2В (сессии) | 22–24 | 1.5 дня |
+| 2Г (браузер) | 25–28 | 2.5 дня |
+| 2Д (watches, apps) | 29–30 | 1 день |
+| 2Е (context, compact, model, diagnostics) | 31–34 | 1.5 дня |
+| Финализация | 35–36 | 0.5 дня |
+| **Итого** | **21 коммит** | **~9.5 дней** |
+
+Буфер на непредвиденное (браузер, Cline-специфика) — **+2 дня**. Итого **~11–12 дней** до готового этапа 2.
+
+---
+
+## 15. Что важно для этапа 3 (Python MCP)
+
+Все 30 эндпоинтов этапа 2 — **1:1 трансляция** в MCP tools:
+
+| Node API | MCP tool |
+|----------|----------|
+| `POST /read` | `ask_read_file` |
+| `POST /list` | `ask_list_files` |
+| `POST /search` | `ask_search` |
+| `POST /write` | `ask_write_file` |
+| `POST /edit` | `ask_edit_file` |
+| `POST /command` | `ask_run_command` |
+| `POST /browser` | `ask_browser` |
+| `GET/POST/DELETE /memory` | `ask_memory_*` |
+| `POST /remember` | `ask_remember` |
+| `GET /notes` | resource `ask://notes/{folder}` |
+| `GET /memory` | resource `ask://memory/{folder}` |
+| `GET /sessions` | resource `ask://sessions/{folder}` |
+| `GET/POST /sessions/*` | `ask_session_*` |
+| `POST /compact` | prompt `ask_compact` |
+| `GET/POST/DELETE /watches` | `ask_watch_*` |
+| `GET/DELETE /apps` | `ask_apps_*` |
+| `GET /context`, `/status` | resource `ask://context`, `ask://status` |
+| `GET/POST /models` | `ask_model_*` |
+| `GET /doctor`, `POST /bug` | `ask_doctor`, `ask_bug` |
+
+Python-слой этапа 3 будет **тонким** (~300–400 строк) — только трансляция и MCP-специфика (resources, prompts, progress notifications).
+
+---
+

@@ -1,0 +1,747 @@
+# Техническое задание: Этап 1
+
+**Проект:** ask-code-mcp
+**Дата:** 2026-11-02
+**Версия документа:** 1.0
+
+---
+
+## 1. Цель этапа
+
+Предоставить Cline (и любому MCP-клиенту) доступ к ask model и её инструментам через два слоя:
+
+1. **Node.js HTTP/SSE API** — исполнение задач ask (модель, tool calls, файлы, память).
+2. **Python MCP-сервер** — трансляция MCP → HTTP, без бизнес-логики.
+
+Этап 1 ограничен **5 MCP-инструментами**: `ask_ask`, `ask_execute`, `ask_start`, `ask_status`, `ask_stop`.
+
+---
+
+## 2. Границы этапа
+
+### Входит
+
+- Node API: 7 эндпоинтов (`/ask`, `/execute`, `/start`, `/status/:id`, `/stop/:id`, `/me`, `/health`).
+- Python MCP: 5 tools.
+- Реестр задач в памяти Node, `MAX_PARALLEL`.
+- Контекст проекта для `/ask` (`ASK.md`, `MEMORY.md`, `env`).
+- Автономный цикл `executeTask` с `doTool` (файлы, команды, память).
+- Автозапуск Node из Python (опционально).
+- Конфиг Cline, README, интеграционные тесты.
+
+### Не входит (Этап 2)
+
+- Прямые tools `ask_read_file`, `ask_write_file`, `ask_run_command`.
+- Браузер (`AskBrowser`, `SafariBrowser`).
+- Watches, `/apps`, ресурсы `ask://…`, промпты.
+- Persistence сессий (`historyFile`).
+- Аутентификация Node API (только `127.0.0.1`).
+- Web UI.
+
+### Допущения
+
+- `ask-code.mjs` доступен и не модифицируется (только `build/patch.mjs`).
+- `ASK_KEY` — валидный ключ с планом Plus+.
+- Node ≥ 18 (для API), Python ≥ 3.10, Node ≥ 22 если понадобится браузер (в этап 1 не понадобится).
+- Cline поддерживает `tools/list`/`tools/call` и `notifications/progress`.
+
+---
+
+## 3. Архитектура
+
+```
+Cline / Claude Desktop
+        │ MCP (JSON-RPC, stdio)
+        ▼
+mcp_server.py  (FastMCP, ~80 строк)
+        │ HTTP + SSE (127.0.0.1:8737)
+        ▼
+ask-code-server.mjs  (Node, ~300 строк)
+        │ HTTPS + SSE
+        ▼
+ask.oryxml.com /v1/*
+```
+
+**Ответственности:**
+- Python — протокол MCP, трансляция.
+- Node — исполнение, состояние задач, работа с ask API и `doTool`.
+
+---
+
+## 4. Контракт Node API
+
+Базовый адрес: `http://127.0.0.1:8737`. Все тела — JSON. Все ответы стриминговых эндпоинтов — `text/event-stream`.
+
+### 4.1. `GET /health`
+
+```json
+200 OK
+{
+  "ok": true,
+  "version": "0.1.0",
+  "node": "22.10.0",
+  "keyPresent": true,
+  "root": "/path/to/project",
+  "running": 0,
+  "maxParallel": 3
+}
+```
+
+### 4.2. `GET /me`
+
+Проксирует `GET /v1/me` с `ASK_KEY`. Возвращает тело как есть (JSON).
+
+Ошибки: `401` если ключ невалиден (с телом `{"error": "..."}`), `502` если ask недоступен.
+
+### 4.3. `POST /ask`
+
+**Запрос:**
+```json
+{ "prompt": "string", "useContext": true }
+```
+
+**Ответ:** SSE-поток.
+
+```
+event: delta
+data: {"text":"..."}
+
+event: usage
+data: {"input":123,"output":456}
+
+event: done
+data: {}
+
+event: error
+data: {"message":"..."}
+```
+
+**Поведение:**
+- `useContext=true` (по умолчанию) — добавляет `system` из `gatherNotes(ROOT)`, `readMemory(memoryDir)`, `folderNow(ROOT)`.
+- Использует `POST /v1/ask` (без tools).
+- `history` не передаётся (stateless).
+
+**Ошибки:** при ошибке ask → `event: error`, затем поток закрывается.
+
+### 4.4. `POST /execute`
+
+**Запрос:**
+```json
+{ "prompt": "string", "mode": "all" }
+```
+
+`mode`: `"all"` (по умолчанию) | `"edits"` | `"plan"`.
+
+**Ответ:** SSE-поток.
+
+```
+event: status
+data: {"state":"thinking"}
+
+event: delta
+data: {"text":"..."}
+
+event: tool
+data: {"name":"read_file","ok":true,"callId":"1"}
+
+event: usage
+data: {"input":...,"output":...}
+
+event: done
+data: {"steps":["read src/add.js","wrote src/add.test.js"],"answer":"..."}
+
+event: error
+data: {"message":"..."}
+```
+
+**Поведение:**
+- Полный цикл `POST /v1/code` + `doTool` + ответы на `tool`.
+- `history: []` (stateless).
+- `notes`, `memory`, `env`, `commands: true`, `folder` — передаются.
+- `doTool` вызывается с `mockInput`, `flags.allowAll = () => true`.
+- По завершении: `apps.stopAll()`.
+
+**Ошибки:** `event: error` при `4xx/5xx` от ask, network error, abort.
+
+### 4.5. `POST /start`
+
+**Запрос:**
+```json
+{ "prompt": "string", "mode": "all" }
+```
+
+**Ответ:**
+```json
+200 OK
+{ "taskId": "uuid", "status": "running" }
+```
+
+**Ошибки:** `429 Too Many Requests` с `{"error": "max parallel tasks (3)"}`, если `running >= MAX_PARALLEL`.
+
+**Поведение:** запускает `executeTask` в фоне, возвращает `taskId` немедленно. События сохраняются в `rec`, доступны через `/status/:id`.
+
+### 4.6. `GET /status/:taskId`
+
+**Ответ:**
+```json
+200 OK
+{
+  "status": "running",
+  "answer": "...",
+  "steps": ["read src/a.js"],
+  "usage": {"input":...,"output":...},
+  "startedAt": "2026-11-02T10:00:00Z",
+  "finishedAt": null,
+  "error": null
+}
+```
+
+`status`: `"running"` | `"done"` | `"error"` | `"stopped"`.
+
+**Ошибки:** `404 Not Found` если `taskId` неизвестен.
+
+### 4.7. `POST /stop/:taskId`
+
+**Ответ:**
+```json
+200 OK
+{ "status": "stopping" }
+```
+
+**Ошибки:** `404` если `taskId` неизвестен.
+
+**Поведение:** вызывает `rec.abort.abort()`, `ctx.browser?.close()`. `status` переходит в `"stopped"` после завершения цикла.
+
+### 4.8. Общие требования
+
+- Все ответы содержат `content-type: application/json` или `text/event-stream`.
+- Ошибки JSON: `{"error": "сообщение"}` с соответствующим HTTP-статусом.
+- Graceful shutdown: по `SIGINT`/`SIGTERM` — abort всех задач, `apps.stopAll()`, закрыть сервер.
+- Логирование: `console.error` (stderr), формат `[LEVEL] [module] message`. Никаких `console.log` в stdout (stdout — только HTTP).
+
+---
+
+## 5. Контракт MCP-сервера (Python)
+
+### 5.1. `ask_ask`
+
+```python
+@mcp.tool()
+async def ask_ask(prompt: str, use_context: bool = True) -> str:
+    """Ask the ask model with this project's context (ASK.md, memory, git).
+    No tools: pure answer. Use for planning and questions; for work in the
+    folder use ask_execute."""
+```
+
+**Поведение:** `POST {ASK_SERVER}/ask` с `{prompt, useContext}`, читает SSE, накапливает `delta`, возвращает финальный текст.
+
+**Ошибки:** при `event: error` — поднять `McpError` с сообщением.
+
+### 5.2. `ask_execute`
+
+```python
+@mcp.tool()
+async def ask_execute(prompt: str, mode: str = "all", ctx: Context = None) -> str:
+    """Autonomous task: reads files, writes code, runs commands.
+    Blocks until done (≤20 min). Use ask_start for background."""
+```
+
+`mode`: `"all"` | `"edits"` | `"plan"`.
+
+**Поведение:** `POST {ASK_SERVER}/execute`, читает SSE, накапливает `delta`, при каждом `tool` и каждом `delta` вызывает `ctx.report_progress(0, None, message)`. По `done` возвращает `answer`.
+
+**Ошибки:** при `event: error` — `McpError`.
+
+### 5.3. `ask_start`
+
+```python
+@mcp.tool()
+async def ask_start(prompt: str, mode: str = "all") -> dict:
+    """Start a task in background. Returns task_id; poll with ask_status."""
+```
+
+**Возврат:** `{"task_id": "...", "status": "running"}` или `{"error": "..."}` при 429.
+
+### 5.4. `ask_status`
+
+```python
+@mcp.tool()
+async def ask_status(task_id: str) -> dict:
+    """Check a background task started with ask_start."""
+```
+
+**Возврат:** ответ `/status/:id` как dict.
+
+### 5.5. `ask_stop`
+
+```python
+@mcp.tool()
+async def ask_stop(task_id: str) -> dict:
+    """Stop a running task."""
+```
+
+**Возврат:** `{"status": "stopping"}` или `{"error": "..."}`.
+
+### 5.6. Общие требования Python
+
+- FastMCP, stdio-транспорт.
+- Все ошибки HTTP → `McpError` с текстом.
+- `ASK_SERVER` из env (default `http://127.0.0.1:8737`).
+- Опционально: автозапуск Node (`ASK_AUTO_START=true`), см. §6.
+
+---
+
+## 6. Конфигурация и окружение
+
+### 6.1. Node API
+
+| Переменная | Default | Обязательна | Описание |
+|-----------|---------|-------------|----------|
+| `ASK_KEY` | — | да | API-ключ ask |
+| `ASK_SITE` | `https://ask.oryxml.com` | нет | Базовый URL ask |
+| `ASK_ROOT` | `process.cwd()` | нет | Папка проекта |
+| `ASK_HOST` | `127.0.0.1` | нет | Хост HTTP-сервера |
+| `ASK_PORT` | `8737` | нет | Порт |
+| `ASK_MODE` | `all` | нет | Режим по умолчанию для `/execute` |
+| `ASK_MAX_PARALLEL` | `3` | нет | Макс. параллельных задач |
+| `ASK_LOG_LEVEL` | `info` | нет | `debug`\|`info`\|`warn`\|`error` |
+
+### 6.2. Python MCP
+
+| Переменная | Default | Описание |
+|-----------|---------|----------|
+| `ASK_SERVER` | `http://127.0.0.1:8737` | URL Node API |
+| `ASK_AUTO_START` | `true` | Запускать Node как subprocess |
+| `ASK_NODE_PATH` | `node` | Путь к node |
+| `ASK_SERVER_SCRIPT` | `./ask-code-server.mjs` | Путь к Node-серверу |
+| `ASK_KEY` | — | Прокидывается в subprocess |
+
+### 6.3. Автозапуск Node из Python
+
+При `ASK_AUTO_START=true`:
+1. Проверить `GET {ASK_SERVER}/health` (timeout 1s).
+2. Если недоступен — `subprocess.Popen([node, script], env={...})`.
+3. Ждать `/health` до 10s.
+4. При выходе — `terminate()` + `wait(timeout=5)` + `kill()`.
+
+Если `ASK_AUTO_START=false` — сервер должен быть запущен вручную (systemd/docker).
+
+---
+
+## 7. Требования безопасности
+
+| Угроза | Мера | Где проверяется |
+|--------|------|-----------------|
+| Чтение `.env`/ключей | `isSecret()` в `doTool` | `doTool` (переиспользуется) |
+| Path traversal | `inside(root, path)` | `doTool` |
+| Секретные команды | `touchesSecret()` → отказ | `mockInput` возвращает `'no'` на «Run it?» |
+| Control chars в командах | `hasControl()` | `runCommand` |
+| `ASK_KEY` в дочерних процессах | `delete env.ASK_KEY` | `runCommand` |
+| Доступ к API извне | Только `127.0.0.1` (bind) | `http.createServer().listen(port, host)` |
+| Утечка ключа в логах | Не логировать `ASK_KEY` | Review кода |
+
+**Открытый вопрос:** аутентификация Node API. В этапе 1 — только `127.0.0.1`, без токена. В этапе 2 — при необходимости `Bearer` через `ASK_TOKEN`.
+
+---
+
+## 8. Требования к логированию
+
+Формат: `[LEVEL] [module] message` в stderr.
+
+- `[INFO] [server] listening on 127.0.0.1:8737 root=/path`
+- `[INFO] [tasks] started <taskId> prompt="..."` (prompt усечён до 100 символов)
+- `[INFO] [tasks] finished <taskId> status=done duration=12.3s`
+- `[WARN] [tasks] max parallel reached (3), rejecting`
+- `[ERROR] [ask] /v1/code failed: 429 quota_exceeded`
+- `[DEBUG] [sse] delta 42 chars`
+
+`ASK_LOG_LEVEL=debug` включает всё. По умолчанию `info`.
+
+**Не логировать:** полные prompt/answer, содержимое файлов, `ASK_KEY`.
+
+---
+
+## 9. Критерии приёмки этапа 1
+
+### Node API
+
+1. `GET /health` → `{ok: true, ...}`.
+2. `GET /me` → JSON аккаунта ask.
+3. `POST /ask` с `useContext=true` → SSE с `delta` и `done`; контекст из `ASK.md` виден в ответе на вопрос «что в ASK.md?».
+4. `POST /execute` с «создай hello.txt с текстом Hello» → SSE, файл `hello.txt` создан, `done.steps` содержит `wrote hello.txt`.
+5. `POST /execute` с «прочитай .env» → `read_file` вернул отказ, модель видит отказ (в `delta`).
+6. `POST /execute` с «прочитай ../../../etc/passwd» → отказ `inside()`, модель видит отказ.
+7. `POST /start` × 2 → оба `taskId` возвращены, `GET /status` обоих — `running`, оба завершаются независимо.
+8. `POST /start` × (MAX_PARALLEL+1) → последний `429`.
+9. `POST /stop/:id` → `status: "stopping"`, затем `GET /status` → `"stopped"`.
+10. `GET /status/unknown` → `404`.
+11. `SIGINT` → все задачи abort, `apps.stopAll()`, процесс завершается за <5s.
+
+### Python MCP
+
+12. `mcp_server.py` запускается, Cline видит 5 tools.
+13. `ask_ask("что в ASK.md?")` → текст с содержимым.
+14. `ask_execute("создай hello.txt")` → файл создан, Cline видит progress notifications.
+15. `ask_start` × 2 → оба `task_id`, `ask_status` показывает прогресс, `ask_stop` останавливает.
+16. `ASK_AUTO_START=true` → Python поднимает Node, при выходе — гасит.
+17. `ASK_AUTO_START=false` + Node не запущен → `ask_ask` возвращает понятную ошибку.
+
+### Безопасность
+
+18. `.env` не читается через `ask_execute`.
+19. `run_command` не видит `ASK_KEY` (проверить `echo $ASK_KEY` через `ask_execute`).
+20. Node слушает только `127.0.0.1` (проверить `ss -tlnp`).
+
+---
+
+## 10. План коммитов
+
+Каждый коммит — самостоятельно собираемый и тестируемый инкремент. Порядок обязателен.
+
+---
+
+### Commit 1: `chore: scaffold project, vendor ask-code, build patch`
+
+**Что делаем:**
+- Создать структуру: `vendor/`, `build/`, `lib/`, `test/`.
+- Скачать `ask-code.mjs` в `vendor/ask-code.mjs` (без изменений).
+- `package.json` с зависимостями: `@modelcontextprotocol/sdk`, `zod` (для будущего; Python SDK ставится отдельно).
+- `.gitignore`: `node_modules/`, `build/ask-code-core.mjs`, `__pycache__/`, `.venv/`.
+- `build/patch.mjs`: добавляет `export` к `api`, `events`, `doTool`. Идемпотентен (если уже экспортировано — no-op).
+
+**Файлы:** `package.json`, `.gitignore`, `build/patch.mjs`, `vendor/ask-code.mjs`.
+
+**Тест:**
+```bash
+npm install
+node build/patch.mjs
+grep -c "^export async function api\|^export async function\* events\|^export async function doTool" build/ask-code-core.mjs
+# → 3
+```
+
+**Зависит от:** —
+
+---
+
+### Commit 2: `feat(server): HTTP skeleton, config, /health, graceful shutdown`
+
+**Что делаем:**
+- `ask-code-server.mjs`: `createServer`, роутинг, `listen(ASK_PORT, ASK_HOST)`.
+- `lib/config.mjs`: чтение env, валидация (`ASK_KEY` обязателен), дефолты.
+- `GET /health` — возвращает `{ok, version, node, keyPresent, root, running, maxParallel}`.
+- Обработка `SIGINT`/`SIGTERM`: закрыть сервер, дождаться in-flight (до 5s), `process.exit(0)`.
+- `lib/log.mjs`: `log(level, module, message)` в stderr с учётом `ASK_LOG_LEVEL`.
+
+**Файлы:** `ask-code-server.mjs`, `lib/config.mjs`, `lib/log.mjs`.
+
+**Тест:**
+```bash
+ASK_KEY=sk-ask-test node ask-code-server.mjs &
+curl -s http://127.0.0.1:8737/health | jq .ok
+# → true
+kill %1
+# → процесс завершается за <5s
+```
+
+**Зависит от:** Commit 1.
+
+---
+
+### Commit 3: `feat(server): GET /me proxy`
+
+**Что делаем:**
+- `GET /me` — `api(SITE, KEY, '/v1/me')`, тело как есть.
+- Обработка `401` → `{error: "invalid key"}` с `401`; `502` → `{error: "ask unreachable"}`.
+
+**Файлы:** `ask-code-server.mjs`, `lib/ask-proxy.mjs` (тонкая обёртка над `api`).
+
+**Тест:**
+```bash
+curl -s http://127.0.0.1:8737/me | jq .code
+# → true (если ключ Plus+)
+curl -s -H "Authorization: Bearer" http://127.0.0.1:8737/me  # не нужно, ключ из env
+ASK_KEY=sk-ask-invalid node ask-code-server.mjs &
+curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8737/me
+# → 401
+```
+
+**Зависит от:** Commit 2.
+
+---
+
+### Commit 4: `feat(server): SSE helper and POST /ask with project context`
+
+**Что делаем:**
+- `lib/sse.mjs`: `writeEvent(res, event, data)`, `pipeSSE(res, iterator)` — превращает async-итератор событий в SSE-поток ответа.
+- `lib/context.mjs`: `buildSystem(ROOT)` — `gatherNotes` + `readMemory` + `folderNow`, склейка в `system` (≤ `NOTES_CHARS` + `MEMORY_CHARS` + 4000).
+- `POST /ask`:
+  - `{prompt, useContext=true}` → `api(SITE, KEY, '/v1/ask', {...})`.
+  - `useContext` → `system = buildSystem(ROOT)`.
+  - `pipeSSE`: `delta`, `usage`, `done`, `error`.
+
+**Файлы:** `ask-code-server.mjs`, `lib/sse.mjs`, `lib/context.mjs`.
+
+**Тест:**
+```bash
+curl -N -X POST http://127.0.0.1:8737/ask \
+  -H 'content-type: application/json' \
+  -d '{"prompt":"что написано в ASK.md? Ответь одной строкой."}'
+# → event: delta ... event: done
+```
+
+**Зависит от:** Commit 3.
+
+---
+
+### Commit 5: `feat(server): task registry and executeTask core`
+
+**Что делаем:**
+- `lib/tasks.mjs`: `Map<taskId, rec>`, `running`, `MAX_PARALLEL`, `createTask()`, `getTask()`, `removeTask()` (с TTL 1 час).
+- `lib/executor.mjs`: `executeTask({prompt, mode, taskId, onEvent})`:
+  - `makeCtx(mode)`: `mockInput`, `Apps`, `memoryDir`, `state`.
+  - Цикл `POST /v1/code` + `events` + `doTool` + `POST /tools/{callId}`.
+  - `apps.stopAll()` в `finally`.
+  - Возвращает `rec` с `answer`, `steps`, `usage`, `status`.
+- `lib/mock-input.mjs`: `ask` возвращает `'no'` на `/Run it|Выполнить/`, иначе `'yes'`; `onInterrupt: null`, `notes: []`.
+
+**Файлы:** `lib/tasks.mjs`, `lib/executor.mjs`, `lib/mock-input.mjs`.
+
+**Тест:** unit-тест `test/executor.test.mjs`: подменить `api`/`doTool` на моки, проверить, что `rec.status='done'`, `rec.steps` содержит `read`.
+
+**Зависит от:** Commit 4.
+
+---
+
+### Commit 6: `feat(server): POST /execute (synchronous task)`
+
+**Что делаем:**
+- `POST /execute`: `{prompt, mode='all'}` → `executeTask` → `pipeSSE` из `onEvent`.
+- События: `status`, `delta`, `tool`, `usage`, `done`, `error`.
+- `mode` валидируется: `all`|`edits`|`plan`, иначе `400`.
+
+**Файлы:** `ask-code-server.mjs`, `lib/executor.mjs` (добавить `onEvent`).
+
+**Тест:**
+```bash
+cd /tmp/test-proj && echo "console.log(1)" > a.js
+curl -N -X POST http://127.0.0.1:8737/execute \
+  -d '{"prompt":"создай hello.txt с текстом Hello"}'
+# → event: tool name=write_file ok=true ... event: done
+ls hello.txt
+```
+
+**Зависит от:** Commit 5.
+
+---
+
+### Commit 7: `feat(server): POST /start, GET /status, POST /stop`
+
+**Что делаем:**
+- `POST /start`: проверка `running < MAX_PARALLEL`, `taskId = randomUUID()`, `executeTask(...).catch(...)` в фоне, ответ `{taskId, status: 'running'}`; при превышении — `429`.
+- `GET /status/:taskId`: `getTask(taskId)` или `404`; возвращает `{status, answer, steps, usage, startedAt, finishedAt, error}`.
+- `POST /stop/:taskId`: `rec.abort.abort()`, `ctx.apps.stopAll()`, ответ `{status: 'stopping'}`.
+
+**Файлы:** `ask-code-server.mjs`, `lib/tasks.mjs`.
+
+**Тест:**
+```bash
+T1=$(curl -s -X POST http://127.0.0.1:8737/start -d '{"prompt":"задача 1"}' | jq -r .taskId)
+T2=$(curl -s -X POST http://127.0.0.1:8737/start -d '{"prompt":"задача 2"}' | jq -r .taskId)
+curl -s http://127.0.0.1:8737/status/$T1 | jq .status  # → "running"
+curl -s -X POST http://127.0.0.1:8737/stop/$T2 | jq .status  # → "stopping"
+sleep 3
+curl -s http://127.0.0.1:8737/status/$T2 | jq .status  # → "stopped"
+```
+
+**Зависит от:** Commit 6.
+
+---
+
+### Commit 8: `feat(server): error handling, MAX_PARALLEL guard, cleanup`
+
+**Что делаем:**
+- Единый error-handler: `lib/errors.mjs` → `sendError(res, status, message)`.
+- `MAX_PARALLEL` guard во всех путях (в т.ч. `/execute`? — нет, `/execute` синхронный, но занимает слот; проверить `running >= MAX_PARALLEL` → `429`).
+- TTL очистки задач: `setInterval` раз в 5 мин, удаляет `done|error|stopped` старше 1 часа.
+- Abort: `onEvent` получает `signal` из `rec.abort`; при abort — `event: error {message: "stopped"}`.
+- Graceful shutdown: abort всех задач, `apps.stopAll()`, закрыть сервер.
+
+**Файлы:** `ask-code-server.mjs`, `lib/errors.mjs`, `lib/tasks.mjs`.
+
+**Тест:** `ASK_MAX_PARALLEL=1`, два `POST /start` → второй `429`; `SIGINT` во время задачи → `status: "stopped"`.
+
+**Зависит от:** Commit 7.
+
+---
+
+### Commit 9: `test(server): integration tests`
+
+**Что делаем:**
+- `test/integration.mjs`: поднимает сервер на свободном порту, гоняет сценарии:
+  - `/health`, `/me`.
+  - `/ask` с `useContext=true`.
+  - `/execute` создаёт файл.
+  - `/execute` с `.env` → отказ.
+  - `/execute` с `../../../etc/passwd` → отказ.
+  - `/start` × 2, `/status`, `/stop`.
+  - `/start` × (MAX+1) → `429`.
+  - `/status/unknown` → `404`.
+- `package.json`: `"test": "node test/integration.mjs"`.
+
+**Файлы:** `test/integration.mjs`, `package.json`.
+
+**Тест:** `npm test` → все зелёные.
+
+**Зависит от:** Commit 8.
+
+---
+
+### Commit 10: `chore(python): scaffold, requirements, MCP server with 5 tool stubs`
+
+**Что делаем:**
+- `requirements.txt`: `mcp>=1.0`, `httpx>=0.27`.
+- `pyproject.toml` (опционально) с метаданными.
+- `mcp_server.py`: FastMCP, регистрация 5 tools — заглушки, возвращающие `"not implemented"`.
+- `lib/client.py`: `ask_get(path)`, `ask_post(path, json)`, `ask_stream(path, json)` — обёртки над httpx.
+
+**Файлы:** `requirements.txt`, `mcp_server.py`, `lib/client.py`.
+
+**Тест:**
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+python mcp_server.py
+# (в другом терминале) MCP inspector → видит 5 tools
+```
+
+**Зависит от:** Commit 9 (нужен работающий Node для smoke-теста, но коммит независим).
+
+---
+
+### Commit 11: `feat(mcp): ask_ask tool`
+
+**Что делаем:**
+- `ask_ask(prompt, use_context=True)`: `POST /ask`, парсит SSE, накапливает `delta`, возвращает текст.
+- `lib/sse_parser.py`: генератор `(event, data)` из `httpx`-стрима.
+
+**Файлы:** `mcp_server.py`, `lib/sse_parser.py`.
+
+**Тест:** MCP inspector → `ask_ask("2+2?")` → `"4"`.
+
+**Зависит от:** Commit 10.
+
+---
+
+### Commit 12: `feat(mcp): ask_execute with progress notifications`
+
+**Что делаем:**
+- `ask_execute(prompt, mode='all', ctx)`: `POST /execute`, парсит SSE, на `delta` и `tool` вызывает `ctx.report_progress(0, None, msg)`, на `done` возвращает `answer`.
+- Валидация `mode`: `all`|`edits`|`plan`.
+
+**Файлы:** `mcp_server.py`.
+
+**Тест:** MCP inspector → `ask_execute("создай hello.txt")` → виден progress, файл создан.
+
+**Зависит от:** Commit 11.
+
+---
+
+### Commit 13: `feat(mcp): ask_start, ask_status, ask_stop`
+
+**Что делаем:**
+- `ask_start(prompt, mode='all')` → `POST /start`, возвращает dict.
+- `ask_status(task_id)` → `GET /status/:id`, возвращает dict.
+- `ask_stop(task_id)` → `POST /stop/:id`, возвращает dict.
+- Обработка `429` в `ask_start` → `McpError`.
+
+**Файлы:** `mcp_server.py`.
+
+**Тест:** MCP inspector → два `ask_start`, оба `ask_status` `running`, `ask_stop` одного → `stopped`.
+
+**Зависит от:** Commit 12.
+
+---
+
+### Commit 14: `feat(mcp): Node subprocess management`
+
+**Что делаем:**
+- `lib/lifecycle.py`: `ensure_node()` — если `GET /health` не отвечает и `ASK_AUTO_START=true`, `Popen([node, script], env={...})`, ждёт `/health` до 10s; `atexit` → `terminate()` + `wait(5)` + `kill()`.
+- Вызов `ensure_node()` при старте `mcp_server.py`.
+- Если `ASK_AUTO_START=false` и Node недоступен — `McpError` с инструкцией.
+
+**Файлы:** `lib/lifecycle.py`, `mcp_server.py`.
+
+**Тест:**
+```bash
+unset ASK_SERVER
+python mcp_server.py  # Node запускается сам
+# Ctrl+C → Node завершается
+```
+
+**Зависит от:** Commit 13.
+
+---
+
+### Commit 15: `docs: Cline config, README, troubleshooting`
+
+**Что делаем:**
+- `README.md`: установка, конфигурация, примеры, troubleshooting (распространённые ошибки: ключ, порт, MAX_PARALLEL).
+- `cline_config.example.json`: готовый конфиг для Cline.
+- `docs/architecture.md`: диаграмма из §3, объяснение слоёв.
+- `docs/api.md`: контракт Node API (копия §4).
+
+**Файлы:** `README.md`, `cline_config.example.json`, `docs/architecture.md`, `docs/api.md`.
+
+**Тест:** следовать README с нуля → рабочая установка.
+
+**Зависит от:** Commit 14.
+
+---
+
+## 11. Риски и митигация
+
+| Риск | Вероятность | Влияние | Митигация |
+|------|-------------|---------|-----------|
+| Несовместимость `@modelcontextprotocol/sdk` с версией Cline | Средняя | Среднее | Проверить на Commit 10; при проблемах — откатиться на FastMCP-only (без Node SDK в Cline-конфиге) |
+| FastMCP progress notifications не отображаются в Cline | Средняя | Низкое | Fallback: возвращать весь ответ в конце; progress — опционально |
+| Zombie Node-процессы при падении Python | Средняя | Низкое | `atexit` + `signal.SIGTERM`; проверить в Commit 14 |
+| Race в реестре задач при параллельных `/start` | Низкая | Среднее | JS single-threaded, `Map` безопасен; тест в Commit 9 |
+| `mockInput` возвращает `'no'` на легитимные команды | Низкая | Среднее | Политика `mode=all` не спрашивает для не-секретных; проверить на Commit 6 |
+| SSE-парсер Python не обрабатывает multi-line `data:` | Низкая | Высокое | Тест `lib/sse_parser.py` с многострочным `data:` |
+| Cline не поддерживает `notifications/progress` | Низкая | Низкое | `ctx.report_progress` — no-op при отсутствии поддержки |
+
+---
+
+## 12. Definition of Done этапа 1
+
+- [ ] Все 15 коммитов смёржены в `main`.
+- [ ] `npm test` — зелёный (Node integration).
+- [ ] Python MCP проходит smoke-тест через MCP inspector.
+- [ ] Cline видит 5 tools и успешно вызывает каждый.
+- [ ] Все 20 критериев приёмки (§9) выполнены.
+- [ ] README позволяет с нуля поднять систему за ≤15 минут.
+- [ ] Нет `console.log` в Node (только `console.error`).
+- [ ] `ASK_KEY` не появляется в логах.
+- [ ] Node слушает только `127.0.0.1`.
+- [ ] Graceful shutdown работает (Node и Python).
+
+---
+
+## 13. Оценка
+
+| Коммит | Оценка |
+|--------|--------|
+| 1–2 | 0.5 дня |
+| 3–4 | 0.5 дня |
+| 5–6 | 1 день |
+| 7–8 | 0.5 дня |
+| 9 | 0.5 дня |
+| 10–11 | 0.5 дня |
+| 12–13 | 0.5 дня |
+| 14 | 0.5 дня |
+| 15 | 0.5 дня |
+| **Итого** | **~5 дней** |
+
+Буфер на непредвиденное (несовместимость SDK, поведение Cline) — **+2 дня**. Итого **~7 дней** до готового этапа 1.
+
+Если нужен — могу расписать любой коммит детальнее (с псевдокодом, точными сигнатурами, тестовыми сценариями), или начать с Commit 1 и вести по коммитам.
