@@ -19,12 +19,21 @@ class FakeBrowser {
     this.headless = opts.headless;
     this.calls = [];
     this.history = [];
+    this.logs = ['error: Uncaught TypeError: x is not a function', 'warning: deprecated'];
     this.url = 'about:blank';
     this.closed = false;
     FakeBrowser.made.push(this);
   }
   async start() {
     if (FakeBrowser.startError) throw new Error(FakeBrowser.startError);
+  }
+  /** What CAPTCHA_SIGNS of ask-code would see on the pages of these tests. */
+  async captchaSigns() {
+    const none = { frames: [], marks: 0, mark: '', solved: false, inputs: 3, text: 'Hello', words: 20 };
+    if (this.url.startsWith('https://captcha.test/check')) return { ...none, frames: ['https://challenges.cloudflare.com/cdn-cgi/challenge-platform/frame=challenge'], inputs: 0 };
+    if (this.url.startsWith('https://captcha.test/form') || this.url.startsWith('http://localhost:3000/form')) return { ...none, marks: 1, mark: 'reCAPTCHA' };
+    if (this.url.startsWith('https://captcha.test/solved')) return { ...none, marks: 1, mark: 'reCAPTCHA', solved: true };
+    return none;
   }
   async here() {
     return { url: this.url, title: 'Fake page' };
@@ -49,7 +58,11 @@ class FakeBrowser {
       }
       return this.view(args.selector ? `Clicked a “${args.selector}”.` : `Clicked at ${args.x}, ${args.y}.`);
     }
-    if (args.action === 'type') return this.view(`Typed ${args.text.length} characters.`);
+    if (args.action === 'type') {
+      if (args.selector === '#password') return { ok: false, output: 'private', private: true };
+      return this.view(`Typed ${args.text.length} characters.`);
+    }
+    if (args.action === 'console') return { ok: true, output: this.logs.splice(0).join('\n') || 'Nothing in the console since the last look.' };
     if (args.action === 'press') return this.view(`Pressed ${args.key ?? 'Enter'}.`);
     if (args.action === 'scroll') return this.view(`Scrolled down ${args.dy ?? 600} px.`);
     if (args.action === 'back') {
@@ -213,6 +226,56 @@ test('POST /browser: a click that leaves the allowed sites goes back and is 403'
   assert.equal(last().url, 'https://example.com/', 'the window went back');
   // In mode all the same click is fine.
   assert.equal((await post('/browser', { action: 'click', selector: 'text=Elsewhere' })).status, 200);
+});
+
+test('POST /browser console: what the page logged, once', async () => {
+  await post('/browser', { action: 'close' });
+  await post('/browser', { action: 'open', url: 'https://example.com' });
+  const first = await post('/browser', { action: 'console', mode: 'plan' });
+  assert.equal(first.status, 200);
+  assert.match(first.json.output, /Uncaught TypeError/);
+  assert.match((await post('/browser', { action: 'console' })).json.output, /Nothing in the console/);
+});
+
+test('POST /browser: typing in a password field is refused with private:true (criterion 25)', async () => {
+  await post('/browser', { action: 'close' });
+  await post('/browser', { action: 'open', url: 'https://example.com' });
+  const r = await post('/browser', { action: 'type', selector: '#password', text: 'hunter2' });
+  assert.equal(r.status, 403);
+  assert.equal(r.json.ok, false);
+  assert.equal(r.json.private, true);
+  assert.equal(r.json.code, 'private');
+  assert.ok(!r.text.includes('hunter2'));
+  // an ordinary field is fine, and says private:false
+  const ok = await post('/browser', { action: 'type', selector: '#q', text: 'hello' });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.private, false);
+});
+
+test('POST /browser: a captcha on the page is reported; one in the way asks for a hand-off (criterion 26)', async () => {
+  await post('/browser', { action: 'close' });
+  const plain = await post('/browser', { action: 'open', url: 'https://example.com' });
+  assert.equal(plain.json.captcha, null);
+  assert.equal(plain.json.handoff_needed, false);
+
+  const check = await post('/browser', { action: 'open', url: 'https://captcha.test/check' });
+  assert.equal(check.status, 200);
+  assert.equal(check.json.captcha.blocking, true);
+  assert.equal(check.json.captcha.kind, 'Cloudflare');
+  assert.equal(check.json.handoff_needed, true);
+  assert.match(check.json.note, /handoff/);
+
+  const form = await post('/browser', { action: 'open', url: 'https://captcha.test/form' });
+  assert.deepEqual(form.json.captcha, { kind: 'reCAPTCHA', blocking: false });
+  assert.equal(form.json.handoff_needed, false);
+
+  const solved = await post('/browser', { action: 'open', url: 'https://captcha.test/solved' });
+  assert.equal(solved.json.captcha, null, 'an answered captcha is none');
+
+  const local = await post('/browser', { action: 'open', url: 'http://localhost:3000/form' });
+  assert.equal(local.json.captcha.local, true);
+  assert.equal(local.json.handoff_needed, false, 'on the own dev server: test keys, no hand-off');
+  assert.match(local.json.note, /test keys/);
 });
 
 test('POST /browser: a browser that cannot start → 502', async () => {
