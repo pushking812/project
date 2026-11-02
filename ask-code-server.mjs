@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { loadConfig, VERSION } from './lib/config.mjs';
 import { log, setLogLevel, setLogSecret } from './lib/log.mjs';
 import { HttpError, sendError, sendJson } from './lib/errors.mjs';
+import { fetchMe } from './lib/ask-proxy.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
 
@@ -28,6 +29,12 @@ export function createApp(config) {
 
   route('GET', /^\/health$/, (req, res) => {
     sendJson(res, 200, { ok: true, version: VERSION, node: process.versions.node, keyPresent: Boolean(config.key), root: config.root, running: app.running(), maxParallel: config.maxParallel });
+  });
+
+  route('GET', /^\/me$/, async (req, res) => {
+    const aborter = new AbortController();
+    res.on('close', () => aborter.abort());
+    sendJson(res, 200, await fetchMe(config, aborter.signal));
   });
 
   const handle = async (req, res) => {
