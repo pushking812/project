@@ -1,12 +1,12 @@
 # ask-code-mcp — описание API (этапы 1 и 2)
 
-Краткое описание проекта и запуск — в [README.md](README.md). Ниже: установка, настройка, все эндпоинты, сценарии,
+Краткое описание проекта и запуск — в [README.md](../README.md). Ниже: установка, настройка, все эндпоинты, сценарии,
 решения и отклонения от ТЗ.
 
 HTTP/SSE server around `ask-code`: it runs ask tasks (model, tool calls, files, commands, memory) for a project folder.
 Stage 1: tasks (`/ask`, `/execute`, `/start`, `/status`, `/stop`). Stage 2: direct file and command endpoints (2A),
 notes and memory (2B), sessions (2C), browser (2Г), watches and apps (2Д), context, compact, model, diagnostics (2Е).
-Short stage 2 reference with `curl` examples: [docs/api-stage2.md](docs/api-stage2.md).
+Short stage 2 reference with `curl` examples: [api-stage2.md](api-stage2.md).
 The Python MCP layer (stage 1, commits 10–15) talks to this API; it is not part of this package yet.
 
 ## Install and run
