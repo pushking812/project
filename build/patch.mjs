@@ -14,6 +14,9 @@ const DECLARATIONS = [
   'async function applyChange(',
   'class Refused ',
   'const hasControl = ',
+  // Stage 2B-sessions (2В): a session title and the file name check of /export.
+  'const titleOf = ',
+  'function checkFile(',
 ];
 const escape = (s) => s.replace(/[()*]/g, '\\$&');
 
