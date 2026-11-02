@@ -11,6 +11,7 @@ import { TaskRegistry } from './lib/tasks.mjs';
 import { executeTask } from './lib/executor.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
+const STOP_FORCE_MS = 8_000;
 const SWEEP_MS = 5 * 60 * 1000;
 
 /**
@@ -103,6 +104,14 @@ export function createApp(config) {
         rec.ctx?.apps.stopAll();
       } catch {}
       void rec.ctx?.browser?.close?.();
+      // A tool that cannot be cancelled may hold the loop: after the grace time mark the task stopped anyway.
+      const timer = setTimeout(() => {
+        if (rec.status !== 'running') return;
+        rec.status = 'stopped';
+        rec.finishedAt = new Date().toISOString();
+        log('warn', 'tasks', `${rec.id} did not end in ${config.stopForceMs ?? STOP_FORCE_MS} ms after /stop, marked stopped`);
+      }, config.stopForceMs ?? STOP_FORCE_MS);
+      timer.unref();
     }
     sendJson(res, 200, { status: rec.status === 'running' ? 'stopping' : rec.status });
   });
