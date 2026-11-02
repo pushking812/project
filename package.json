@@ -12,6 +12,6 @@
     "start": "node build/patch.mjs && node ask-code-server.mjs",
     "pretest": "node build/patch.mjs",
     "test:browser": "node build/patch.mjs && node --test test/browser-real.mjs",
-    "test": "node --test test/integration.mjs test/stage2.mjs test/sessions.mjs test/browser.mjs"
+    "test": "node --test test/integration.mjs test/stage2.mjs test/sessions.mjs test/browser.mjs test/watches.mjs"
   }
 }

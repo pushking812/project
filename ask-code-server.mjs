@@ -15,6 +15,8 @@ import { addMemoryRoutes } from './lib/memory.mjs';
 import { addSessionRoutes } from './lib/session-routes.mjs';
 import { checkSessionId, lockSession } from './lib/sessions.mjs';
 import { addBrowserRoutes } from './lib/browser.mjs';
+import { addWatchRoutes } from './lib/watches.mjs';
+import { addAppRoutes, sharedApps } from './lib/apps.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
 const STOP_FORCE_MS = 8_000;
@@ -30,12 +32,15 @@ export function createApp(config) {
   const route = (method, pattern, handler) => routes.push([method, pattern, handler]);
 
   const registry = new TaskRegistry({ maxParallel: config.maxParallel });
+  const AppsClass = sharedApps(Apps);
   const app = {
     config,
     server: null,
     registry,
+    /** Apps of the server and of its tasks count from one number (GET /apps). */
+    AppsClass,
     /** Background apps started by POST /command (stage 2). */
-    apps: new Apps(),
+    apps: new AppsClass(),
     /** Number of tasks running now. */
     running: () => registry.running,
     /** Hooks run on shutdown, before the server closes. */
@@ -92,7 +97,7 @@ export function createApp(config) {
     res.on('close', () => {
       if (rec.status === 'running') rec.abort.abort();
     });
-    await executeTask({ rec, config, onEvent: ({ event, data }) => writeEvent(res, event, data) });
+    await executeTask({ rec, config, onEvent: ({ event, data }) => writeEvent(res, event, data), deps: { Apps: AppsClass } });
     if (!res.writableEnded) res.end();
   });
 
@@ -105,7 +110,7 @@ export function createApp(config) {
       if (e.status === 429) log('warn', 'tasks', `max parallel reached (${config.maxParallel}), rejecting`);
       throw e;
     }
-    executeTask({ rec, config }).catch((e) => log('error', 'tasks', `${rec.id} crashed: ${e.message}`));
+    executeTask({ rec, config, deps: { Apps: AppsClass } }).catch((e) => log('error', 'tasks', `${rec.id} crashed: ${e.message}`));
     sendJson(res, 200, { taskId: rec.id, status: 'running' });
   });
 
@@ -142,6 +147,8 @@ export function createApp(config) {
   addMemoryRoutes(app);
   addSessionRoutes(app);
   addBrowserRoutes(app);
+  addWatchRoutes(app);
+  addAppRoutes(app);
 
   const handle = async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;
