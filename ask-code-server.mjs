@@ -9,6 +9,8 @@ import { pipeSSE, logged, openSSE, writeEvent } from './lib/sse.mjs';
 import { buildContext } from './lib/context.mjs';
 import { TaskRegistry } from './lib/tasks.mjs';
 import { executeTask } from './lib/executor.mjs';
+import { Apps } from './build/ask-code-core.mjs';
+import { addFileRoutes } from './lib/files.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
 const STOP_FORCE_MS = 8_000;
@@ -28,6 +30,8 @@ export function createApp(config) {
     config,
     server: null,
     registry,
+    /** Background apps started by POST /command (stage 2). */
+    apps: new Apps(),
     /** Number of tasks running now. */
     running: () => registry.running,
     /** Hooks run on shutdown, before the server closes. */
@@ -116,6 +120,9 @@ export function createApp(config) {
     sendJson(res, 200, { status: rec.status === 'running' ? 'stopping' : rec.status });
   });
 
+  // Stage 2
+  addFileRoutes(app);
+
   const handle = async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;
     let known = false;
@@ -133,7 +140,7 @@ export function createApp(config) {
   app.server = createServer((req, res) => {
     handle(req, res).catch((e) => {
       if (!(e instanceof HttpError)) log('error', 'server', `${req.method} ${req.url} failed: ${e.message}`);
-      sendError(res, e instanceof HttpError ? e.status : 500, e instanceof HttpError ? e.message : 'internal error');
+      sendError(res, e instanceof HttpError ? e.status : 500, e instanceof HttpError ? e.message : 'internal error', e instanceof HttpError ? e.code : undefined);
     });
   });
 
@@ -158,6 +165,9 @@ export function createApp(config) {
   app.onShutdown.push(async () => {
     clearInterval(sweepTimer);
     registry.abortAll();
+    try {
+      app.apps.stopAll();
+    } catch {}
     for (const rec of registry.tasks.values()) {
       try {
         rec.ctx?.apps.stopAll();

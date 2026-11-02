@@ -6,7 +6,15 @@ import { pathToFileURL } from 'node:url';
 const VENDOR = new URL('../vendor/ask-code.mjs', import.meta.url);
 const CORE = new URL('./ask-code-core.mjs', import.meta.url);
 
-const DECLARATIONS = ['async function api(', 'async function* events(', 'async function doTool('];
+const DECLARATIONS = [
+  'async function api(',
+  'async function* events(',
+  'async function doTool(',
+  // Stage 2: what the direct endpoints (/write, /command, ...) need.
+  'async function applyChange(',
+  'class Refused ',
+  'const hasControl = ',
+];
 const escape = (s) => s.replace(/[()*]/g, '\\$&');
 
 /**
