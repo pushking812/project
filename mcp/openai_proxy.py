@@ -36,7 +36,7 @@ LIMIT_SYSTEM = 20_000
 LIMIT_HISTORY = 400
 LIMIT_PROMPT = 100_000
 LIMIT_TOOL_RESULT = 8_000
-LIMIT_TOOLS_BLOCK = 25_000
+LIMIT_TOOLS_BLOCK = int(os.environ.get("PROXY_TOOLS_BLOCK", "").strip() or 25_000)
 # Крупнейшая живая схема родного инструмента — read_files, 1 475 знаков; плюс имя, разделители
 # и 400 знаков описания ≈ 1 900. 2 200 берёт её целиком с запасом.
 LIMIT_TOOL_LINE = 2_200
@@ -198,6 +198,28 @@ TOOLS_REMINDER = (
 )
 TOOLS_HEADER = "Доступные инструменты:"
 
+# Заметки проекта (ASK.md) для модели: читаются при каждом запросе, перезапуск после правки не нужен.
+# PROXY_NOTES_FILE — путь к файлу (по умолчанию ASK.md в корне проекта, рядом с папкой mcp);
+# PROXY_NOTES_CHARS — лимит знаков (по умолчанию 4000); PROXY_NOTES_FILE=off отключает.
+_NOTES_DEFAULT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ASK.md")
+
+
+def _notes_text() -> str:
+    path = os.environ.get("PROXY_NOTES_FILE", "").strip() or _NOTES_DEFAULT
+    if path.lower() == "off":
+        return ""
+    try:
+        limit = int(os.environ.get("PROXY_NOTES_CHARS", "").strip() or 4000)
+        with open(path, encoding="utf-8-sig") as f:
+            text = f.read().strip()
+    except (OSError, ValueError):
+        return ""
+    if not text:
+        return ""
+    if len(text) > limit:
+        text = text[:limit] + "\n…(заметки обрезаны)"
+    return "Заметки проекта (ASK.md):\n" + text
+
 
 def _tools_catalog(tools: list[dict]) -> tuple[str, int, list[str]]:
     """Каталог инструментов для начала prompt -> (текст, сколько вошло, имена отброшенных).
@@ -207,7 +229,15 @@ def _tools_catalog(tools: list[dict]) -> tuple[str, int, list[str]]:
     LIMIT_TOOL_LINE инструмент пропускается целиком; так же инструмент, не влезший в остаток LIMIT_TOOLS_BLOCK, пропускается целиком.
     """
     defs = _tool_defs(tools)
-    defs = [d for d in defs if "__" not in d[0]] + [d for d in defs if "__" in d[0]]
+    # Серверы, чьи инструменты в каталог не попадают: подстрока в части имени до «__» (cadcraft, wordcraft…).
+    skip = tuple(p.strip().lower() for p in os.environ.get("PROXY_TOOL_EXCLUDE", "craft").split(",") if p.strip())
+    if skip:
+        defs = [d for d in defs if "__" not in d[0] or not any(s in d[0].split("__", 1)[0].lower() for s in skip)]
+    first = tuple(p.strip() for p in os.environ.get("PROXY_TOOL_FIRST", "ask__").split(",") if p.strip())
+    mcp = [d for d in defs if "__" in d[0]]
+    defs = ([d for d in defs if "__" not in d[0]]
+            + [d for d in mcp if d[0].startswith(first)]   # MCP-сервер ask — перед остальными MCP
+            + [d for d in mcp if not d[0].startswith(first)])
     lines = [TOOLS_HEADER]
     used = len(TOOLS_HEADER)
     dropped: list[str] = []
@@ -265,7 +295,8 @@ def _build(messages: list, tools: list[dict] | None, model: str) -> tuple[dict, 
         entries, truncated = entries[-LIMIT_HISTORY:], True
 
     # system: что не влезло в room, не теряется, а уходит в голову prompt (стабильное — первым).
-    protocol = TOOLS_PROTOCOL if tools else ""
+    notes = _notes_text() if tools else ""
+    protocol = (notes + "\n\n" + TOOLS_PROTOCOL if notes else TOOLS_PROTOCOL) if tools else ""
     sys_text = "\n\n".join(s for s in systems if s)
     room = LIMIT_SYSTEM - len(protocol) - (2 if protocol and sys_text else 0)
     spill = ""

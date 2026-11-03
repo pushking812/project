@@ -1,6 +1,6 @@
 """Файлы Office: чтение и правка .xlsx (openpyxl) и .docx (python-docx). Работают локально, без HTTP API.
 
-Папка проекта: ASK_OFFICE_ROOT, иначе ASK_CODE_ROOT, иначе корень репозитория. Пути только относительные.
+Папка проекта: ASK_OFFICE_ROOT, иначе ASK_CODE_ROOT, иначе корень репозитория. Путь: относительный или абсолютный (внутри корня; вне корня только при ASK_OFFICE_ALLOW_ANY_PATH=1).
 Библиотеки подключаются при вызове: без них сервер стартует, а инструмент вернёт понятную ошибку.
 Ограничение: openpyxl и python-docx не сохраняют часть содержимого (диаграммы, картинки в xlsx, макросы).
 """
@@ -23,17 +23,73 @@ def _path(path: str, ext: str) -> str:
     clean = (path or "").replace("\\", "/").strip()
     if not clean:
         raise ValueError("path не задан")
-    if clean.startswith("/") or (len(clean) > 1 and clean[1] == ":"):
-        raise ValueError(f"абсолютный путь запрещён: {path}")
     root = _root()
-    full = os.path.abspath(os.path.join(root, clean))
-    if full != root and not full.startswith(root + os.sep):
-        raise ValueError(f"путь вне проекта: {path}")
+    is_abs = clean.startswith("/") or (len(clean) > 1 and clean[1] == ":")
+    full = os.path.abspath(clean if is_abs else os.path.join(root, clean))
+    inside = full == root or os.path.normcase(full).startswith(os.path.normcase(root) + os.sep)
+    if not inside and os.environ.get("ASK_OFFICE_ALLOW_ANY_PATH") != "1":
+        raise ValueError(f"путь вне корня {root}: {path} (расширить: ASK_OFFICE_ROOT или ASK_OFFICE_ALLOW_ANY_PATH=1)")
+    if is_abs:
+        clean = full.replace("\\", "/")
     if any(p.lower() in DENY for p in clean.split("/")):
         raise ValueError(f"доступ запрещён: {path}")
     if not full.lower().endswith(ext):
         raise ValueError(f"нужен файл {ext}: {path}")
     return full
+
+
+def _excel_path(path: str) -> str:
+    """Путь к книге Excel: .xlsx или .xlsm."""
+    clean = (path or "").strip().lower()
+    return _path(path, ".xlsm" if clean.endswith(".xlsm") else ".xlsx")
+
+
+def _word_path(path: str) -> str:
+    """Путь к документу Word: .docx или .docm."""
+    clean = (path or "").strip().lower()
+    return _path(path, ".docm" if clean.endswith(".docm") else ".docx")
+
+
+_DOCX_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+_DOCM_CT = "application/vnd.ms-word.document.macroEnabled.main+xml"
+
+
+def _swap_ct(data: bytes, old: str, new: str) -> bytes:
+    """Заменить тип основной части в [Content_Types].xml (остальные части архива не меняются)."""
+    import io
+    import zipfile
+
+    src = zipfile.ZipFile(io.BytesIO(data))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            body = src.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                body = body.decode("utf-8").replace(old, new).encode("utf-8")
+            dst.writestr(item, body)
+    return out.getvalue()
+
+
+def _word_open(docx, full: str):
+    """Открыть .docx или .docm (для .docm тип основной части временно подменяется, vbaProject.bin сохраняется)."""
+    if not full.lower().endswith(".docm"):
+        return docx.Document(full)
+    import io
+
+    with open(full, "rb") as f:
+        return docx.Document(io.BytesIO(_swap_ct(f.read(), _DOCM_CT, _DOCX_CT)))
+
+
+def _word_save(doc, full: str) -> None:
+    if not full.lower().endswith(".docm"):
+        doc.save(full)
+        return
+    import io
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    with open(full, "wb") as f:
+        f.write(_swap_ct(buf.getvalue(), _DOCX_CT, _DOCM_CT))
 
 
 def _ok(**data: Any) -> str:
@@ -59,16 +115,17 @@ def _plain(v: Any) -> Any:
 
 # ---------- xlsx ----------
 
-def read_xlsx(path: str, sheet: str | None = None, cell_range: str | None = None,
-              max_rows: int = 200, values_only: bool = False) -> str:
-    """Прочитать .xlsx. Без sheet — первый лист; список всех листов возвращается всегда.
+def read_excel(path: str, sheet: str | None = None, cell_range: str | None = None,
+               max_rows: int = 200, values_only: bool = False) -> str:
+    """Прочитать книгу Excel (.xlsx или .xlsm). Без sheet — первый лист; список всех листов возвращается всегда.
 
     cell_range: например "A1:D20" (по умолчанию весь занятый диапазон). max_rows: лимит строк.
     Формулы возвращаются текстом ("=SUM(A1:A3)"); values_only=true — вычисленные значения, сохранённые Excel.
     """
     try:
         openpyxl = _need("openpyxl", "openpyxl")
-        wb = openpyxl.load_workbook(_path(path, ".xlsx"), data_only=values_only)
+        full = _excel_path(path)
+        wb = openpyxl.load_workbook(full, data_only=values_only, keep_vba=full.lower().endswith(".xlsm"))
         names = wb.sheetnames
         ws = wb[sheet] if sheet else wb[names[0]]
         area = ws[cell_range] if cell_range else ws.iter_rows()
@@ -90,9 +147,9 @@ def read_xlsx(path: str, sheet: str | None = None, cell_range: str | None = None
         return _fail(e)
 
 
-def write_xlsx(path: str, cells: dict[str, Any] | None = None, rows: list[list[Any]] | None = None,
-               sheet: str | None = None, start_cell: str = "A1", create_sheet: bool = True) -> str:
-    """Создать или изменить .xlsx. Остальное содержимое существующего файла сохраняется.
+def write_excel(path: str, cells: dict[str, Any] | None = None, rows: list[list[Any]] | None = None,
+                sheet: str | None = None, start_cell: str = "A1", create_sheet: bool = True) -> str:
+    """Создать или изменить книгу Excel (.xlsx или .xlsm; макросы .xlsm сохраняются). Остальное содержимое файла сохраняется.
 
     cells: {"B2": 10, "C2": "=B2*2"} — значения по адресам; строка с "=" в начале становится формулой.
     rows: список строк, пишется блоком от start_cell. sheet: имя листа (по умолчанию первый или новый "Sheet").
@@ -104,9 +161,15 @@ def write_xlsx(path: str, cells: dict[str, Any] | None = None, rows: list[list[A
 
         if not cells and not rows:
             raise ValueError("нужны cells или rows")
-        full = _path(path, ".xlsx")
+        full = _excel_path(path)
+        macro = full.lower().endswith(".xlsm")
         existed = os.path.isfile(full)
-        wb = openpyxl.load_workbook(full) if existed else openpyxl.Workbook()
+        if existed:
+            wb = openpyxl.load_workbook(full, keep_vba=macro)
+        else:
+            if macro:
+                raise ValueError("новый .xlsm создайте через Excel или write_vba; здесь можно менять только существующий")
+            wb = openpyxl.Workbook()
         if sheet and sheet not in wb.sheetnames:
             if not create_sheet:
                 raise ValueError(f"лист не найден: {sheet}; есть: {wb.sheetnames}")
@@ -171,11 +234,11 @@ def _replace_in_paragraph(p, old: str, new: str) -> int:
     return n
 
 
-def read_docx(path: str, max_paragraphs: int = 500) -> str:
-    """Прочитать .docx: абзацы (с номером, стилем) и таблицы (строки ячеек)."""
+def read_word(path: str, max_paragraphs: int = 500) -> str:
+    """Прочитать документ Word (.docx или .docm): абзацы (с номером, стилем) и таблицы (строки ячеек)."""
     try:
         docx = _need("docx", "python-docx")
-        doc = docx.Document(_path(path, ".docx"))
+        doc = _word_open(docx, _word_path(path))
         paras = [{"i": i, "style": p.style.name if p.style is not None else None, "text": p.text}
                  for i, p in enumerate(doc.paragraphs)]
         truncated = len(paras) > max_paragraphs
@@ -185,22 +248,24 @@ def read_docx(path: str, max_paragraphs: int = 500) -> str:
         return _fail(e)
 
 
-def edit_docx(path: str, replacements: list[dict[str, str]] | None = None,
+def edit_word(path: str, replacements: list[dict[str, str]] | None = None,
               append_paragraphs: list[str] | None = None, insert_after: int | None = None,
               heading_level: int | None = None, table_rows: list[list[str]] | None = None) -> str:
-    """Изменить или создать .docx.
+    """Изменить документ Word (.docx или .docm; макросы .docm сохраняются) или создать .docx.
 
     replacements: [{"old": "...", "new": "..."}] — замена текста в абзацах, таблицах, колонтитулах.
-    append_paragraphs: новые абзацы в конец, либо после абзаца с номером insert_after (номер из read_docx).
+    append_paragraphs: новые абзацы в конец, либо после абзаца с номером insert_after (номер из read_word).
     heading_level: 1–9 — оформить добавляемые абзацы как заголовки.
     table_rows: добавить таблицу в конец документа (список строк из ячеек).
-    Файла нет — создаётся новый документ.
+    Файла нет — создаётся новый .docx (новый .docm создайте через Word или write_vba).
     """
     try:
         docx = _need("docx", "python-docx")
-        full = _path(path, ".docx")
+        full = _word_path(path)
         existed = os.path.isfile(full)
-        doc = docx.Document(full) if existed else docx.Document()
+        if not existed and full.lower().endswith(".docm"):
+            raise ValueError("новый .docm создайте через Word или write_vba; здесь можно менять только существующий")
+        doc = _word_open(docx, full) if existed else docx.Document()
         if not (replacements or append_paragraphs or table_rows):
             raise ValueError("нужны replacements, append_paragraphs или table_rows")
         report = []
@@ -238,11 +303,11 @@ def edit_docx(path: str, replacements: list[dict[str, str]] | None = None,
                 for j, v in enumerate(r):
                     table.cell(i, j).text = str(v)
         os.makedirs(os.path.dirname(full), exist_ok=True)
-        doc.save(full)
+        _word_save(doc, full)
         return _ok(path=path, created=not existed, replacements=report, paragraphs_added=added,
                    table_added=bool(table_rows))
     except Exception as e:  # noqa: BLE001
         return _fail(e)
 
 
-TOOLS = [read_xlsx, write_xlsx, read_docx, edit_docx]
+TOOLS = [read_excel, write_excel, read_word, edit_word]
