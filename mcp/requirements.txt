@@ -2,3 +2,5 @@ mcp>=1.2,<2
 httpx>=0.27
 starlette>=1.0,<2
 uvicorn>=0.54,<1
+openpyxl>=3.1,<4
+python-docx>=1.1,<2
