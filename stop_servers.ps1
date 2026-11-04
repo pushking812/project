@@ -1,6 +1,6 @@
-# stop_servers.ps1
-# Останавливает сами серверы (по портам). Оболочки во вкладках, запущенные
-# через "cmd /c ... & exit 0", завершаются с кодом 0, и вкладки закрываются сами.
+п»ї# stop_servers.ps1
+# РћСЃС‚Р°РЅР°РІР»РёРІР°РµС‚ СЃР°РјРё СЃРµСЂРІРµСЂС‹ (РїРѕ РїРѕСЂС‚Р°Рј). РћР±РѕР»РѕС‡РєРё РІРѕ РІРєР»Р°РґРєР°С…, Р·Р°РїСѓС‰РµРЅРЅС‹Рµ
+# С‡РµСЂРµР· "cmd /c ... & exit 0", Р·Р°РІРµСЂС€Р°СЋС‚СЃСЏ СЃ РєРѕРґРѕРј 0, Рё РІРєР»Р°РґРєРё Р·Р°РєСЂС‹РІР°СЋС‚СЃСЏ СЃР°РјРё.
 $ErrorActionPreference = 'SilentlyContinue'
 $projectMarker = 'code-ask-api'
 $ports = 8737, 8000, 8789   # ASK HTTP, MCP, OpenAI Proxy
@@ -12,14 +12,14 @@ function Stop-Tree {
     }
 }
 
-# 1. Процессы, слушающие порты серверов
+# 1. РџСЂРѕС†РµСЃСЃС‹, СЃР»СѓС€Р°СЋС‰РёРµ РїРѕСЂС‚С‹ СЃРµСЂРІРµСЂРѕРІ
 foreach ($port in $ports) {
     Get-NetTCPConnection -LocalPort $port -State Listen |
         Select-Object -ExpandProperty OwningProcess -Unique |
         ForEach-Object { Stop-Tree $_ }
 }
 
-# 2. Запасной вариант: процессы по командной строке
+# 2. Р—Р°РїР°СЃРЅРѕР№ РІР°СЂРёР°РЅС‚: РїСЂРѕС†РµСЃСЃС‹ РїРѕ РєРѕРјР°РЅРґРЅРѕР№ СЃС‚СЂРѕРєРµ
 Get-CimInstance Win32_Process |
     Where-Object {
         $_.ProcessId -ne $PID -and
@@ -29,7 +29,7 @@ Get-CimInstance Win32_Process |
     } |
     ForEach-Object { Stop-Tree $_.ProcessId }
 
-# 3. Node из папки проекта
+# 3. Node РёР· РїР°РїРєРё РїСЂРѕРµРєС‚Р°
 Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" |
     Where-Object {
         ($_.ExecutablePath -like "*$projectMarker*") -or
@@ -37,4 +37,4 @@ Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" |
     } |
     ForEach-Object { Stop-Tree $_.ProcessId }
 
-Write-Host 'Серверы остановлены, вкладки закроются автоматически.' -ForegroundColor Green
+Write-Host 'РЎРµСЂРІРµСЂС‹ РѕСЃС‚Р°РЅРѕРІР»РµРЅС‹, РІРєР»Р°РґРєРё Р·Р°РєСЂРѕСЋС‚СЃСЏ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё.' -ForegroundColor Green

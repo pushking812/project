@@ -3,6 +3,8 @@ build/ask-code-core.mjs
 __pycache__/
 .venv/
 .env
+postman/.cloud.json
+.postman-root/
 *.log
 test-proj/
 ask-code.mjs

@@ -1,4 +1,4 @@
-# start_servers.ps1
+п»ї# start_servers.ps1
 if ((Get-ExecutionPolicy -Scope Process) -ne 'Bypass') {
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath
     exit
@@ -9,25 +9,25 @@ $currentDir = (Get-Location).Path
 $mcpDir = Join-Path $currentDir 'mcp'
 
 if (-not (Get-Command wt.exe -ErrorAction SilentlyContinue)) {
-    throw 'wt.exe не найден. Установлен ли Windows Terminal?'
+    throw 'wt.exe РЅРµ РЅР°Р№РґРµРЅ. РЈСЃС‚Р°РЅРѕРІР»РµРЅ Р»Рё Windows Terminal?'
 }
 if (-not (Test-Path $mcpDir)) {
-    throw "Не найдена папка: $mcpDir"
+    throw "РќРµ РЅР°Р№РґРµРЅР° РїР°РїРєР°: $mcpDir"
 }
 
 $initScript = Join-Path $currentDir 'init_app.ps1'
 if (Test-Path $initScript) {
-    Write-Host 'Проверка окружения (init_app.ps1)...' -ForegroundColor Cyan
+    Write-Host 'РџСЂРѕРІРµСЂРєР° РѕРєСЂСѓР¶РµРЅРёСЏ (init_app.ps1)...' -ForegroundColor Cyan
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $initScript
     if ($LASTEXITCODE -ne 0) {
-        Write-Host 'Проверка окружения не пройдена, серверы не запущены.' -ForegroundColor Red
+        Write-Host 'РџСЂРѕРІРµСЂРєР° РѕРєСЂСѓР¶РµРЅРёСЏ РЅРµ РїСЂРѕР№РґРµРЅР°, СЃРµСЂРІРµСЂС‹ РЅРµ Р·Р°РїСѓС‰РµРЅС‹.' -ForegroundColor Red
         exit 1
     }
 } else {
-    Write-Host 'init_app.ps1 не найден, проверка окружения пропущена.' -ForegroundColor Yellow
+    Write-Host 'init_app.ps1 РЅРµ РЅР°Р№РґРµРЅ, РїСЂРѕРІРµСЂРєР° РѕРєСЂСѓР¶РµРЅРёСЏ РїСЂРѕРїСѓС‰РµРЅР°.' -ForegroundColor Yellow
 }
 $Host.UI.RawUI.WindowTitle = 'START'
-Write-Host 'Инициализация запуска серверов...' -ForegroundColor Cyan
+Write-Host 'РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ Р·Р°РїСѓСЃРєР° СЃРµСЂРІРµСЂРѕРІ...' -ForegroundColor Cyan
 
 function Test-Server($url, $any) {
     $code = (& curl.exe -s -o NUL -w '%{http_code}' --connect-timeout 2 $url) -as [int]
@@ -46,15 +46,15 @@ function Show-ServerStatus($name, $url, $any, $timeoutSec = 30) {
     else { Write-Host '[FAIL]' -ForegroundColor Red }
 }
 
-Write-Host 'Запуск серверов:' -ForegroundColor Cyan
+Write-Host 'Р—Р°РїСѓСЃРє СЃРµСЂРІРµСЂРѕРІ:' -ForegroundColor Cyan
 
 wt -w 0 new-tab -p 'Windows PowerShell' -d $currentDir --title 'NPM Server' cmd /c 'npm start & exit 0'
-Show-ServerStatus 'Сервер ASK HTTP' 'http://127.0.0.1:8737/health' $false
+Show-ServerStatus 'РЎРµСЂРІРµСЂ ASK HTTP' 'http://127.0.0.1:8737/health' $false
 
 wt -w 0 new-tab -p 'Windows PowerShell' -d $mcpDir --title 'MCP Server' cmd /c 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run_server.ps1 & exit 0'
-Show-ServerStatus 'Сервер MCP' 'http://127.0.0.1:8000/mcp' $true
+Show-ServerStatus 'РЎРµСЂРІРµСЂ MCP' 'http://127.0.0.1:8000/mcp' $true
 
 wt -w 0 new-tab -p 'Windows PowerShell' -d $mcpDir --title 'OpenAI Proxy' cmd /c '.\.venv\Scripts\python.exe openai_proxy.py & exit 0'
-Show-ServerStatus 'Сервер OpenAI Proxy' 'http://127.0.0.1:8789/healthz' $false
+Show-ServerStatus 'РЎРµСЂРІРµСЂ OpenAI Proxy' 'http://127.0.0.1:8789/healthz' $false
 
-Write-Host 'Все процессы запущены!' -ForegroundColor Green
+Write-Host 'Р’СЃРµ РїСЂРѕС†РµСЃСЃС‹ Р·Р°РїСѓС‰РµРЅС‹!' -ForegroundColor Green
