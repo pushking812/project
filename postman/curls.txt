@@ -146,3 +146,43 @@ curl -s -X POST http://127.0.0.1:8737/model -H "Content-Type: application/json" 
 curl -i -X POST http://127.0.0.1:8737/model -H "Content-Type: application/json" -d '{"name":"no-such-model"}'
 curl -s http://127.0.0.1:8737/doctor
 curl -s -X POST http://127.0.0.1:8737/bug -H "Content-Type: application/json" -d '{"text":"What went wrong"}'
+
+# =====================================================================
+# ЭТАП 3 (Linux / macOS / Git Bash). Для Windows: curl.exe и JSON в двойных кавычках с \" как выше.
+# =====================================================================
+
+# --- 3А: рабочая папка (ключ ASK_KEY не нужен) ---
+curl -s http://127.0.0.1:8737/workspace
+# сменить корень (папка должна существовать, лежать в домашней папке или в ASK_ALLOWED_ROOTS)
+curl -s -X POST http://127.0.0.1:8737/workspace -H "Content-Type: application/json" -d '{"path":"C:/Users/user/Desktop/ask-workspace-test"}'
+# повтор на тот же корень: 200 already_current
+curl -s -X POST http://127.0.0.1:8737/workspace -H "Content-Type: application/json" -d '{"path":"C:/Users/user/Desktop/ask-workspace-test"}'
+# ошибки: 400 invalid_path, 403 system_path (два примера), 403 home_forbidden, 403 not_allowed, 404 not_found
+curl -i -X POST http://127.0.0.1:8737/workspace -H "Content-Type: application/json" -d '{"path":""}'
+curl -i -X POST http://127.0.0.1:8737/workspace -H "Content-Type: application/json" -d '{"path":"C:/Windows"}'
+curl -i -X POST http://127.0.0.1:8737/workspace -H "Content-Type: application/json" -d '{"path":"C:/"}'
+curl -i -X POST http://127.0.0.1:8737/workspace -H "Content-Type: application/json" -d '{"path":"C:/Users/user"}'
+curl -i -X POST http://127.0.0.1:8737/workspace -H "Content-Type: application/json" -d '{"path":"D:/x"}'
+curl -i -X POST http://127.0.0.1:8737/workspace -H "Content-Type: application/json" -d '{"path":"C:/Users/user/Desktop/no-such-dir"}'
+# 403 plan_mode: запустите сервер с ASK_MODE=plan и повторите смену корня
+# 409 tasks_running: смена корня при идущем /ask, /browser, /compact или задаче
+
+# --- 3Б: files в /ask, /execute, /start (нужен ASK_KEY; до 5 файлов, пути относительно корня; hello-postman.txt создаёт POST /write из 2A) ---
+curl -N -X POST http://127.0.0.1:8737/ask -H "Content-Type: application/json" -d '{"prompt":"what is in this file?","files":["hello-postman.txt"]}'
+curl -N -X POST http://127.0.0.1:8737/ask -H "Content-Type: application/json" -d '{"prompt":"what is in this file?","files":[{"path":"hello-postman.txt"}]}'
+curl -N -X POST http://127.0.0.1:8737/execute -H "Content-Type: application/json" -d '{"prompt":"summarize the file","files":["hello-postman.txt"],"mode":"plan"}'
+curl -s -X POST http://127.0.0.1:8737/start -H "Content-Type: application/json" -d '{"prompt":"summarize the file","files":["hello-postman.txt"],"mode":"plan"}'
+# --- 3Б: output_files (нужен ASK_KEY) ---
+# /execute: в событии done есть "output_files": ["report.md"], если задача создала или изменила файлы (иначе поля нет)
+curl -N -X POST http://127.0.0.1:8737/execute -H "Content-Type: application/json" -d '{"prompt":"create report.md with the text Done","mode":"all"}'
+# /start -> /status/<taskId>: то же в поле outputFiles (заполняется по ходу задачи)
+curl -s -X POST http://127.0.0.1:8737/start -H "Content-Type: application/json" -d '{"prompt":"create report.md with the text Done","mode":"all"}'
+curl -s http://127.0.0.1:8737/status/TASK_ID
+# файлы от run_command (например .xlsx из скрипта) тоже попадают в список; отключить: ASK_OUTPUT_SCAN=0 при запуске сервера
+# ошибки (до начала потока): 400 invalid_files (два примера), 403 secret, 403 outside, 404 not_found, 413 too_many_files
+curl -i -X POST http://127.0.0.1:8737/ask -H "Content-Type: application/json" -d '{"prompt":"x","files":"hello-postman.txt"}'
+curl -i -X POST http://127.0.0.1:8737/ask -H "Content-Type: application/json" -d '{"prompt":"x","files":[42]}'
+curl -i -X POST http://127.0.0.1:8737/ask -H "Content-Type: application/json" -d '{"prompt":"x","files":[".env"]}'
+curl -i -X POST http://127.0.0.1:8737/ask -H "Content-Type: application/json" -d '{"prompt":"x","files":["../outside.txt"]}'
+curl -i -X POST http://127.0.0.1:8737/ask -H "Content-Type: application/json" -d '{"prompt":"x","files":["no-such-file.txt"]}'
+curl -i -X POST http://127.0.0.1:8737/ask -H "Content-Type: application/json" -d '{"prompt":"x","files":["a","b","c","d","e","f"]}'
