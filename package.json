@@ -12,7 +12,10 @@
     "start": "node build/patch.mjs && node ask-code-server.mjs",
     "pretest": "node build/patch.mjs",
     "test:live": "node build/patch.mjs && node --test --test-timeout=240000 --test-reporter=tap test/live.mjs",
+    "postman:sync": "node postman/tools/postman-cloud.mjs sync",
+    "postman:runs": "node postman/tools/postman-cloud.mjs run",
+    "postman:all": "node postman/tools/postman-cloud.mjs all",
     "test:browser": "node build/patch.mjs && node --test test/browser-real.mjs",
-    "test": "node --test test/integration.mjs test/stage2.mjs test/sessions.mjs test/browser.mjs test/execute-browser.mjs test/watches.mjs test/diagnostics.mjs test/security.mjs"
+    "test": "node --test test/integration.mjs test/stage2.mjs test/sessions.mjs test/browser.mjs test/execute-browser.mjs test/watches.mjs test/diagnostics.mjs test/security.mjs test/workspace.mjs test/files.mjs test/outputs.mjs test/integration-files.mjs test/last-root.mjs"
   }
 }

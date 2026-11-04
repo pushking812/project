@@ -21,10 +21,19 @@ import { addInfoRoutes } from './lib/info.mjs';
 import { addCompactRoutes } from './lib/compact.mjs';
 import { addModelRoutes } from './lib/models.mjs';
 import { addDoctorRoutes } from './lib/doctor.mjs';
+import { addWorkspaceRoutes } from './lib/workspace-routes.mjs';
+import { rootFile, rememberRootOn, saveLastRoot, restorableRoot } from './lib/last-root.mjs';
+import { checkFiles, attachFiles } from './lib/attach.mjs';
 
 const SHUTDOWN_GRACE_MS = 4_000;
 const STOP_FORCE_MS = 8_000;
 const SWEEP_MS = 5 * 60 * 1000;
+/** Requests that read or use the folder while they run. POST /workspace answers 409 tasks_running while one is in flight. */
+const TRACKED = [
+  ['POST', /^\/ask$/],
+  ['POST', /^\/browser$/],
+  ['POST', /^\/compact$/],
+];
 
 /**
  * Builds the server (does not listen yet).
@@ -35,6 +44,7 @@ export function createApp(config) {
   const routes = [];
   const route = (method, pattern, handler) => routes.push([method, pattern, handler]);
 
+  let active = 0;
   const registry = new TaskRegistry({ maxParallel: config.maxParallel });
   const AppsClass = sharedApps(Apps);
   const app = {
@@ -47,8 +57,12 @@ export function createApp(config) {
     apps: new AppsClass(),
     /** Number of tasks running now. */
     running: () => registry.running,
+    /** Requests in flight that work in the current folder but are no task (/ask, /browser, /compact): see TRACKED. */
+    activeRequests: () => active,
     /** Hooks run on shutdown, before the server closes. */
     onShutdown: [],
+    /** Hooks run after POST /workspace changed config.root: they let go of the old folder (stage 3). */
+    onWorkspaceChange: [],
     route,
   };
 
@@ -63,19 +77,20 @@ export function createApp(config) {
   });
 
   route('POST', /^\/ask$/, async (req, res) => {
-    const { prompt, useContext = true } = await readJson(req);
+    const { prompt, useContext = true, files: filePaths } = await readJson(req);
     if (typeof prompt !== 'string' || !prompt.trim()) throw new HttpError(400, 'prompt must be a non-empty string');
     if (typeof useContext !== 'boolean') throw new HttpError(400, 'useContext must be true or false');
+    const files = await attachFiles(config, checkFiles(filePaths)); // 400 invalid_files, 403, 404, 413: before the stream opens
     const aborter = new AbortController();
     res.on('close', () => aborter.abort());
     const { memoryDir, ...context } = useContext ? await buildContext(config) : {};
     log('debug', 'ask', `/ask prompt=${brief(prompt, 60)} context=${useContext}`);
-    await pipeSSE(res, logged('ask', askStream(config, { prompt, ...(config.model ? { model: config.model } : {}), ...context }, aborter.signal)));
+    await pipeSSE(res, logged('ask', askStream(config, { prompt, ...(config.model ? { model: config.model } : {}), ...(files.length ? { files } : {}), ...context }, aborter.signal)));
   });
 
   /** Reads and checks the body of /execute and /start. */
   const readTaskBody = async (req) => {
-    const { prompt, mode = config.mode, session_id: sessionId, browser = false, allowedSites, headless, captcha } = await readJson(req);
+    const { prompt, mode = config.mode, session_id: sessionId, browser = false, allowedSites, headless, captcha, files: filePaths } = await readJson(req);
     if (typeof prompt !== 'string' || !prompt.trim()) throw new HttpError(400, 'prompt must be a non-empty string');
     if (!MODES.includes(mode)) throw new HttpError(400, `mode must be one of ${MODES.join(', ')}`);
     if (sessionId !== undefined) checkSessionId(sessionId);
@@ -85,14 +100,15 @@ export function createApp(config) {
     }
     if (headless !== undefined && typeof headless !== 'boolean') throw new HttpError(400, 'headless must be true or false', 'bad_request');
     if (captcha !== undefined && !CAPTCHA_MODES.includes(captcha)) throw new HttpError(400, `captcha must be one of ${CAPTCHA_MODES.join(', ')}`, 'bad_request');
-    return { prompt, mode, sessionId, browser, headless, captcha, allowedSites: (allowedSites ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean) };
+    const files = await attachFiles(config, checkFiles(filePaths)); // errors answer before the task exists
+    return { prompt, mode, sessionId, browser, headless, captcha, files, allowedSites: (allowedSites ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean) };
   };
 
   /** A task record. With a session_id the session is taken for it (409 when a task already runs in it). */
-  const createTask = ({ prompt, mode, sessionId, browser, headless, captcha, allowedSites }) => {
+  const createTask = ({ prompt, mode, sessionId, browser, headless, captcha, allowedSites, files }) => {
     const release = sessionId ? lockSession(config, config.root, sessionId) : null;
     try {
-      const rec = registry.create({ prompt, mode, sessionId: sessionId ?? null, browser, headless, captcha, allowedSites }); // 429 when MAX_PARALLEL tasks run
+      const rec = registry.create({ prompt, mode, sessionId: sessionId ?? null, browser, headless, captcha, allowedSites, files }); // 429 when MAX_PARALLEL tasks run
       rec.release = release;
       return rec;
     } catch (e) {
@@ -163,6 +179,10 @@ export function createApp(config) {
   addCompactRoutes(app);
   addModelRoutes(app);
   addDoctorRoutes(app);
+  // Stage 3
+  addWorkspaceRoutes(app);
+  // Apps of POST /command were started in the old folder.
+  app.onWorkspaceChange.push(() => app.apps.stopAll());
 
   const handle = async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;
@@ -172,7 +192,13 @@ export function createApp(config) {
       if (!match) continue;
       known = true;
       if (req.method !== method) continue;
-      await handler(req, res, match);
+      const tracked = TRACKED.some(([m, p]) => m === method && p.test(path));
+      if (tracked) active++;
+      try {
+        await handler(req, res, match);
+      } finally {
+        if (tracked) active--;
+      }
       return;
     }
     throw new HttpError(known ? 405 : 404, known ? 'method not allowed' : 'not found');
@@ -263,7 +289,19 @@ async function main() {
   setLogSecret(config.key);
   if (!['127.0.0.1', 'localhost', '::1'].includes(config.host)) log('warn', 'server', `ASK_HOST=${config.host} is not a loopback address: the API has no authentication`);
 
+  // The last folder of POST /workspace survives a restart (not with ASK_ROOT set or ASK_REMEMBER_ROOT=0).
+  const remember = rememberRootOn();
+  const rootPath = rootFile();
+  if (remember) {
+    const saved = restorableRoot(rootPath, config);
+    if (saved && saved !== config.root) {
+      log('info', 'server', `root restored from the last session: ${saved} (default was ${config.root})`);
+      config.root = saved;
+    }
+  }
+
   const app = createApp(config);
+  if (remember) app.onWorkspaceChange.push(({ to }) => void saveLastRoot(rootPath, to));
   let port;
   try {
     port = await app.listen();

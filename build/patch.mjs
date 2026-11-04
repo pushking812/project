@@ -22,6 +22,8 @@ const DECLARATIONS = [
   // Stage 2E: /model and /compact.
   'const pickModel = ',
   'const COMPACT_PROMPT =',
+  // Stage 3B: `files` of /ask and /execute are read like read_file reads them.
+  'async function readOne(',
 ];
 const escape = (s) => s.replace(/[()*]/g, '\\$&');
 
