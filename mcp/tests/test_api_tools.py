@@ -112,6 +112,87 @@ def test_execute_maps_camel_case_fields(monkeypatch):
     assert seen[0][3] == {"prompt": "x", "allowedSites": ["a.com"], "headless": False, "captcha": "handoff"}
 
 
+def test_files_are_sent_by_ask_execute_start(monkeypatch):
+    seen = install(monkeypatch, stream_reply(sse(("done", {}))))
+    run(tasks.ask("q", files=["a.pdf", "b.png"]))
+    run(tasks.execute("x", files=["a.xlsx"]))
+    assert seen[0][3] == {"prompt": "q", "useContext": True, "files": ["a.pdf", "b.png"]}
+    assert seen[1][3] == {"prompt": "x", "files": ["a.xlsx"]}
+    seen2 = install(monkeypatch, json_reply({"taskId": "T"}))
+    run(tasks.start_task("x", files=["n.txt"]))
+    assert seen2[0][3] == {"prompt": "x", "files": ["n.txt"]}
+
+
+def test_files_not_sent_when_empty(monkeypatch):
+    seen = install(monkeypatch, stream_reply(sse(("done", {}))))
+    run(tasks.ask("q"))
+    run(tasks.ask("q", files=[]))
+    run(tasks.execute("x"))
+    assert "files" not in seen[0][3] and "files" not in seen[1][3] and "files" not in seen[2][3]
+
+
+def test_execute_returns_output_files(monkeypatch):
+    install(monkeypatch, stream_reply(sse(("done", {"output_files": ["report.md", "src/a.js"]}))))
+    out = json.loads(run(tasks.execute("x")))
+    assert out["output_files"] == ["report.md", "src/a.js"]
+    assert out["done"]["output_files"] == ["report.md", "src/a.js"]
+
+
+def test_execute_without_output_files_has_no_key(monkeypatch):
+    install(monkeypatch, stream_reply(sse(("done", {"steps": []}))))
+    assert "output_files" not in json.loads(run(tasks.execute("x")))
+
+
+def test_analyze_read_uses_ask_with_file(monkeypatch):
+    from ask_mcp.tools import analysis
+    seen = install(monkeypatch, stream_reply(sse(("delta", {"text": "3 листа"}), ("usage", {"input": 1}), ("done", {}))))
+    out = json.loads(run(analysis.analyze("hello.xlsx", "опиши")))
+    assert seen[0][:2] == ("POST", "/ask")
+    assert seen[0][3] == {"prompt": "опиши", "files": ["hello.xlsx"], "useContext": True}
+    assert out == {"text": "3 листа", "usage": {"input": 1}}
+
+
+def test_analyze_write_uses_execute_and_returns_output_files(monkeypatch):
+    from ask_mcp.tools import analysis
+    raw = sse(("delta", {"text": "Готово"}), ("done", {"answer": "Готово.", "output_files": ["report.xlsx"]}))
+    seen = install(monkeypatch, stream_reply(raw))
+    out = json.loads(run(analysis.analyze("hello.xlsx", "создай отчёт", mode="write")))
+    assert seen[0][:2] == ("POST", "/execute")
+    assert seen[0][3] == {"prompt": "создай отчёт", "files": ["hello.xlsx"], "mode": "all"}
+    assert out == {"answer": "Готово.", "output_files": ["report.xlsx"]}
+
+
+def test_analyze_write_without_files_omits_key(monkeypatch):
+    from ask_mcp.tools import analysis
+    install(monkeypatch, stream_reply(sse(("delta", {"text": "Нет"}), ("done", {}))))
+    assert json.loads(run(analysis.analyze("a.py", "x", mode="write"))) == {"answer": "Нет"}
+
+
+@pytest.mark.parametrize("args", [("a.py", "x", "bad"), ("", "x", "read"), ("a.py", " ", "read")])
+def test_analyze_validates_input_without_request(monkeypatch, args):
+    from ask_mcp.tools import analysis
+    seen = install(monkeypatch, stream_reply(sse(("done", {}))))
+    with pytest.raises(server.AskError):
+        run(analysis.analyze(*args))
+    assert seen == []
+
+
+def test_wrappers_send_their_prompt(monkeypatch):
+    from ask_mcp.tools import analysis
+    monkeypatch.delenv("ASK_LANG", raising=False)
+    seen = install(monkeypatch, stream_reply(sse(("delta", {"text": "ok"}), ("done", {}))))
+    for fn in (analysis.review, analysis.summarize, analysis.explain):
+        run(fn("a.py"))
+    run(analysis.plan("добавить тесты"))
+    assert [s[3].get("files") for s in seen] == [["a.py"], ["a.py"], ["a.py"], None]
+    assert "ошибки" in seen[0][3]["prompt"] and "краткое" in seen[1][3]["prompt"].lower()
+    assert "Объясни" in seen[2][3]["prompt"]
+    assert "добавить тесты" in seen[3][3]["prompt"] and seen[3][3]["useContext"] is True
+    monkeypatch.setenv("ASK_LANG", "en")
+    run(analysis.summarize("a.py"))
+    assert "summary" in seen[4][3]["prompt"]
+
+
 def test_error_event_keeps_partial_answer(monkeypatch):
     raw = sse(("delta", {"text": "половина"}), ("error", {"message": "the connection to ask dropped"}))
     install(monkeypatch, stream_reply(raw))
@@ -233,6 +314,27 @@ def test_clear_memory_needs_confirm(monkeypatch):
     assert seen == []  # без confirm запроса нет
     run(memory.clear_memory(confirm=True))
     assert seen[0][:3] == ("DELETE", "/memory", {"mode": "all"})
+
+
+def test_workspace_tools(monkeypatch):
+    from ask_mcp.tools import workspace
+
+    seen = install(monkeypatch, json_reply({"ok": True, "root": "/p"}))
+    run(workspace.get_workspace())
+    run(workspace.set_workspace("src"))
+    run(workspace.set_workspace("/p", mode="edits"))
+    assert [(m, p) for m, p, _, _ in seen] == [("GET", "/workspace"), ("POST", "/workspace"), ("POST", "/workspace")]
+    assert seen[1][3] == {"path": "src"}  # None не уходит в запрос
+    assert seen[2][3] == {"path": "/p", "mode": "edits"}
+    assert {"get_workspace", "set_workspace"} <= names("api")
+
+
+def test_workspace_errors_keep_the_code(monkeypatch):
+    from ask_mcp.tools import workspace
+
+    install(monkeypatch, json_reply({"error": "2 task(s) are running", "code": "tasks_running"}, 409))
+    with pytest.raises(server.AskError, match="409 tasks_running"):
+        run(workspace.set_workspace("/p"))
 
 
 def test_memory_notes_sessions_service_routes(monkeypatch):

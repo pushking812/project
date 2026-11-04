@@ -1,6 +1,6 @@
 """Файлы Office: чтение и правка .xlsx (openpyxl) и .docx (python-docx). Работают локально, без HTTP API.
 
-Папка проекта: ASK_OFFICE_ROOT, иначе ASK_CODE_ROOT, иначе корень репозитория. Путь: относительный или абсолютный (внутри корня; вне корня только при ASK_OFFICE_ALLOW_ANY_PATH=1).
+Папка проекта: ASK_OFFICE_ROOT, иначе рабочая папка сервера (GET /workspace, меняется через set_workspace), иначе ASK_CODE_ROOT, иначе корень репозитория. Путь: относительный или абсолютный (внутри корня; вне корня только при ASK_OFFICE_ALLOW_ANY_PATH=1).
 Библиотеки подключаются при вызове: без них сервер стартует, а инструмент вернёт понятную ошибку.
 Ограничение: openpyxl и python-docx не сохраняют часть содержимого (диаграммы, картинки в xlsx, макросы).
 """
@@ -15,8 +15,26 @@ DENY = {".env", ".git", ".venv", "__pycache__"}
 MAX_CELLS = 5000
 
 
+def _server_root() -> str | None:
+    """Рабочая папка нашего сервера (GET /workspace). Сервер не отвечает или ответ странный: None."""
+    try:
+        import httpx
+
+        from ..config import local_api_url
+
+        r = httpx.get(local_api_url() + "/workspace", timeout=2.0)
+        root = r.json().get("root") if r.status_code == 200 else None
+        return root if isinstance(root, str) and root else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _root() -> str:
-    return os.path.abspath(os.environ.get("ASK_OFFICE_ROOT") or os.environ.get("ASK_CODE_ROOT") or _REPO_ROOT)
+    """ASK_OFFICE_ROOT, если задан; иначе рабочая папка сервера (та же, что у analyze и files); иначе ASK_CODE_ROOT или корень репозитория."""
+    explicit = os.environ.get("ASK_OFFICE_ROOT")
+    if explicit:
+        return os.path.abspath(explicit)
+    return os.path.abspath(_server_root() or os.environ.get("ASK_CODE_ROOT") or _REPO_ROOT)
 
 
 def _path(path: str, ext: str) -> str:

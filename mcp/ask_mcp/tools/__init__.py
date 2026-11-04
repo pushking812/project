@@ -1,9 +1,10 @@
 """Инструменты MCP, работающие через HTTP API нашего сервера (бэкенд «api»). Одна группа на модуль."""
 
-from . import browser, files, memory, office, service, sessions, tasks, vba, watches
+from . import analysis, browser, files, memory, office, service, sessions, tasks, vba, watches, workspace
 
 GROUPS = {
     "tasks": tasks,
+    "analysis": analysis,
     "files": files,
     "office": office,
     "vba": vba,
@@ -12,6 +13,7 @@ GROUPS = {
     "browser": browser,
     "watches": watches,
     "service": service,
+    "workspace": workspace,
 }
 
 

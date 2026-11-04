@@ -501,7 +501,9 @@ def test_rules_survive_system_cut(monkeypatch, capsys):
     log = log_lines(capsys)[-1]
     assert len(body["system"]) == openai_proxy.LIMIT_SYSTEM
     assert log["system_cut"] is True
-    assert log["spill_chars"] == len(system) - 19_740 == 17_073
+    # место под system = лимит - протокол - 2 (разделитель); в spill уходит всё, что за (место - CUT)
+    kept = openai_proxy.LIMIT_SYSTEM - len(openai_proxy.TOOLS_PROTOCOL) - 2 - len(openai_proxy.CUT)
+    assert log["spill_chars"] == len(system) - kept
     assert marker in body["prompt"] and marker not in body["system"]
     assert not body["system"].endswith(openai_proxy.CUT)  # конец — протокол
     assert body["system"].endswith(openai_proxy.TOOLS_PROTOCOL)
@@ -510,13 +512,14 @@ def test_rules_survive_system_cut(monkeypatch, capsys):
 
 def test_fits_without_spill(monkeypatch, capsys):
     seen = install(monkeypatch, raw=reply("ok"))
-    system = "H" * 18_999 + "P" * 247
+    room = openai_proxy.LIMIT_SYSTEM - len(openai_proxy.TOOLS_PROTOCOL) - 2  # ровно впритык
+    system = "H" * (room - 247) + "P" * 247
     assert chat({"messages": [{"role": "system", "content": system}] + msg(), "tools": TOOLS}).status_code == 200
     body = asks(seen)[0]
     log = log_lines(capsys)[-1]
     assert log["system_cut"] is False and log["spill_chars"] == 0
     assert "H" * 100 not in body["prompt"]
-    assert body["system"].startswith("H" * 18_999)
+    assert body["system"].startswith("H" * (room - 247))
     assert body["system"].endswith(openai_proxy.TOOLS_PROTOCOL)
 
 
@@ -532,7 +535,21 @@ def test_prompt_budget_counts_spill(monkeypatch, capsys):
     assert "msg-399 " in body["prompt"]
 
 
+def test_spill_shrinks_for_big_tools_catalog(monkeypatch, capsys):
+    # каталог до 60 000 знаков + спилл system не должны выталкивать историю и выходить за предел
+    seen = install(monkeypatch, raw=reply("ok"))
+    messages = [{"role": "system", "content": "S" * 200_000}]
+    messages += [{"role": "user", "content": f"msg-{i} " + "x" * 300} for i in range(400)]
+    assert chat({"messages": messages, "tools": _catalog_tools()}).status_code == 200
+    body = asks(seen)[0]
+    log = log_lines(capsys)[-1]
+    assert len(body["prompt"]) <= openai_proxy.LIMIT_PROMPT
+    assert log["spill_chars"] < openai_proxy.LIMIT_PROMPT // 2
+    assert "msg-399 " in body["prompt"]
+
+
 def test_spill_is_capped(monkeypatch, capsys):
+    monkeypatch.setattr(openai_proxy, "LIMIT_TOOLS_BLOCK", 25_000)  # прежний размер каталога
     seen = install(monkeypatch, raw=reply("ok"))
     system = "S" * 200_000
     messages = [{"role": "system", "content": system}]

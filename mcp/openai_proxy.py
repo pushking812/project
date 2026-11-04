@@ -4,7 +4,8 @@
 дочитывание обрыва делает server._ask_stream, здесь события только переводятся в формат OpenAI.
 
 Переменные: PROXY_TOKEN (обязателен, не равен ASK_API_KEY), PROXY_HOST (127.0.0.1),
-PROXY_PORT (8789), PROXY_MODEL (claude-sonnet-5-5). Ключ Ask берётся как в server.py
+PROXY_PORT (8789), PROXY_MODEL (claude-sonnet-5-5), PROXY_TOOLS_BLOCK (знаков в каталоге
+инструментов, 60000; при 25000 отбрасывались инструменты ask__*). Ключ Ask берётся как в server.py
 (ASK_API_KEY или .env).
 """
 
@@ -36,7 +37,7 @@ LIMIT_SYSTEM = 20_000
 LIMIT_HISTORY = 400
 LIMIT_PROMPT = 100_000
 LIMIT_TOOL_RESULT = 8_000
-LIMIT_TOOLS_BLOCK = int(os.environ.get("PROXY_TOOLS_BLOCK", "").strip() or 25_000)
+LIMIT_TOOLS_BLOCK = int(os.environ.get("PROXY_TOOLS_BLOCK", "").strip() or 60_000)
 # Крупнейшая живая схема родного инструмента — read_files, 1 475 знаков; плюс имя, разделители
 # и 400 знаков описания ≈ 1 900. 2 200 берёт её целиком с запасом.
 LIMIT_TOOL_LINE = 2_200
@@ -302,7 +303,9 @@ def _build(messages: list, tools: list[dict] | None, model: str) -> tuple[dict, 
     spill = ""
     if len(sys_text) > room:
         spill = sys_text[max(room, 0) - len(CUT):] if room >= len(CUT) else sys_text
-        spill = spill[: LIMIT_PROMPT // 2]  # страховка: спилл не должен съесть всю историю
+        # страховка: спилл не должен съесть всю историю; каталог инструментов тоже занимает
+        # место в промпте, поэтому на историю всегда остаётся не меньше LIMIT_PROMPT // 5
+        spill = spill[: max(0, min(LIMIT_PROMPT // 2, LIMIT_PROMPT - len(catalog) - LIMIT_PROMPT // 5))]
         sys_text, truncated = _cut(sys_text, max(room, 0)), True
     system = "\n\n".join(s for s in (sys_text, protocol) if s)
 

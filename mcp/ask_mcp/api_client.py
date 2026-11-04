@@ -122,6 +122,8 @@ def fold_stream(events: list[tuple[str, dict]]) -> dict:
         elif event == "done":
             done = True
             out["done"] = data
+            if isinstance(data.get("output_files"), list):
+                out["output_files"] = data["output_files"]  # поле есть, только если задача что-то записала
         elif event == "error":
             msg = str(data.get("message") or data)
             if parts:
