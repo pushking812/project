@@ -194,6 +194,21 @@ function Test-Environment {
     Check 'Proxy' 'PROXY_HOST' $false -DotEnv -Default '127.0.0.1'
     Check 'Proxy' 'PROXY_MODEL' $false -DotEnv -Default 'claude-sonnet-5-5'
 
+    Write-Host ' Telegram-бот (необязательно), переменные среды и mcp\.env:' -ForegroundColor White
+    Check 'Bot' 'TELEGRAM_BOT_TOKEN' $false -DotEnv -Secret -Default 'бот не запускается без него' -Check {
+        param($v)
+        if ($v -notmatch '^\d+:[\w-]+$') { 'нужен токен от @BotFather вида 123456789:AA...' }
+    }
+    Check 'Bot' 'TELEGRAM_ALLOWED_USER_IDS' $false -DotEnv -Default 'бот не запускается без него' -Check {
+        param($v)
+        if ($v -notmatch '^-?\d+(\s*,\s*-?\d+)*$') { 'нужны числовые id через запятую' }
+    }
+    Check 'Bot' 'TELEGRAM_MCP_URL' $false -DotEnv -Default 'http://127.0.0.1:8000/mcp'
+    Check 'Bot' 'TELEGRAM_DEFAULT_MODE' $false -DotEnv -Default 'plan' -Check {
+        param($v)
+        if ('all', 'edits', 'plan' -notcontains $v) { 'допустимо: all, edits, plan' }
+    }
+
     if ($script:envWarn -gt 0) { Warn "Предупреждений: $($script:envWarn) (ASK_API_KEY не задана: задайте в mcp\.env или командой setx ASK_API_KEY ...)." }
     if ($script:envBad -eq 0) { Ok 'Переменные среды в порядке [OK]'; return $true }
     Fail "Проблемных переменных: $($script:envBad). Задайте их командой setx ИМЯ ЗНАЧЕНИЕ (и откройте новый терминал) или в mcp\.env (кроме ASK_KEY: он читается только из среды)."

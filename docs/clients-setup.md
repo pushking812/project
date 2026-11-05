@@ -6,6 +6,7 @@
 |---|---|---|---|
 | **MCP-сервер** `mcp/server.py` | инструменты ask для агента | клиент сам запускает его по stdio | — |
 | **OpenAI Proxy** `mcp/openai_proxy.py` | OpenAI-совместимый шлюз к ask (`/v1/chat/completions`, `/v1/models`) | клиент ходит по HTTP | 8789 |
+| **Telegram-бот** `mcp/telegram_bot.py` | команды MCP-серверу из Telegram | long polling, входящих портов нет | — |
 
 Инструменты MCP обращаются к Node-серверу ASK HTTP (`http://127.0.0.1:8737`), поэтому перед работой
 запустите серверы: `.\start_servers.ps1` (или `npm start`).

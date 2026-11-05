@@ -15,4 +15,5 @@ npm test                 # тесты на заглушке сайта, ключ
 `register_proxy.ps1`): **[docs/clients-setup.md](docs/clients-setup.md)**.
 
 Полное описание API (эндпоинты, настройки, примеры, сценарии, отклонения от ТЗ): **[docs/api-stage1.md](docs/api-stage1.md)**.
+Telegram-бот для управления MCP-сервером с телефона: **[docs/telegram-bot.md](docs/telegram-bot.md)**.
 Справочник этапа 2 с примерами `curl`: **[docs/api-stage2.md](docs/api-stage2.md)**.

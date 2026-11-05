@@ -27,6 +27,11 @@ MCP-сервер Ask. С версии 2 по умолчанию (`MCP_BACKEND=ap
 | `openai_proxy.py`, `run_proxy.ps1` | OpenAI-совместимый прокси для Cline/Continue (см. раздел «Прокси») |
 | `.env.example` | образец файла `.env` с ключом и настройками прокси |
 | `requirements.txt` | зависимости (`mcp>=1.2,<2`, `httpx`, `starlette`, `uvicorn`) |
+| `telegram_bot.py` | Telegram-бот: MCP-клиент по Streamable HTTP, команды из чата (см. [../docs/telegram-bot.md](../docs/telegram-bot.md)) |
+| `ask_mcp/bot/` | модули бота: `config`, `tg` (Bot API на httpx), `mcp_client` (сессия MCP), `commands`, `app`, `service` (`/svc`) |
+| `check_bot.py` | проверка бота без сообщений: токен (`getMe`) и список инструментов MCP |
+| `run_bot.ps1` | запуск бота с `.venv` |
+| `.env.example` | образец `mcp\.env`: ключ Ask, прокси, переменные Telegram-бота |
 
 ## Установка (Windows)
 
@@ -322,6 +327,26 @@ Inspector — веб-интерфейс для ручного вызова ин�
 | `PROXY_TOOL_POLICY` | `ask` — `ask`, `native`, `mcp` или `off`: чем пользоваться для действий, родными инструментами клиента или MCP |
 
 Прокси отвечает не больше чем на два запроса одновременно. Слишком большой вход обрезается (system 20 000 символов, история 400 сообщений, промпт 100 000, результат инструмента 8 000) с пометкой в ответе и `truncated: true` в логе. На каждый ход в `stderr` пишется одна строка JSON (длины, статус, usage, limits; без ключей и текста промпта). Каждый запрос расходует лимит тарифа, `/v1/models` и `/healthz` — нет.
+
+## Telegram-бот
+
+`telegram_bot.py` — управление MCP-сервером из Telegram: задачи, статус, файлы, сессии, браузер, диагностика.
+Бот подключается к уже запущенному `server.py --http` (`TELEGRAM_MCP_URL`, по умолчанию `http://127.0.0.1:8000/mcp`),
+наружу ничего не открывает (long polling), пускает только id из `TELEGRAM_ALLOWED_USER_IDS` и по умолчанию
+работает в режиме `plan`.
+
+```
+cd mcp
+.\.venv\Scripts\python.exe -m pip install pytest  # для тестов, если ещё нет
+notepad .env                                    # TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_IDS
+.\run_server.ps1                                # MCP-сервер (или /svc start из бота)
+.\run_bot.ps1
+.\.venv\Scripts\python.exe check_bot.py         # токен и связь с MCP, без сообщений
+```
+
+Команды: `/help`, `/status`, `/exec`, `/plan`, `/task`, `/stop`, `/ask`, `/tools`, `/call`, `/ws`, `/cd`, `/ls`,
+`/cat`, `/sessions`, `/browser`, `/doctor`, `/svc`. Полное описание, переменные и ограничения —
+[docs/telegram-bot.md](../docs/telegram-bot.md).
 
 ## Проверка
 

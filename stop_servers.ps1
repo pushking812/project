@@ -24,7 +24,7 @@ Get-CimInstance Win32_Process |
     Where-Object {
         $_.ProcessId -ne $PID -and
         $_.CommandLine -and
-        $_.CommandLine -match 'openai_proxy\.py|run_server\.ps1|ask-code-server' -and
+        $_.CommandLine -match 'openai_proxy\.py|run_server\.ps1|ask-code-server|telegram_bot\.py' -and
         $_.Name -notmatch '^(cmd|powershell|WindowsTerminal)\.exe$'
     } |
     ForEach-Object { Stop-Tree $_.ProcessId }

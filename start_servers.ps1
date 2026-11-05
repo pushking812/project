@@ -57,4 +57,18 @@ Show-ServerStatus 'Сервер MCP' 'http://127.0.0.1:8000/mcp' $true
 wt -w 0 new-tab -p 'Windows PowerShell' -d $mcpDir --title 'OpenAI Proxy' cmd /c '.\.venv\Scripts\python.exe openai_proxy.py & exit 0'
 Show-ServerStatus 'Сервер OpenAI Proxy' 'http://127.0.0.1:8789/healthz' $false
 
+# Telegram-бот запускается, только если токен уже задан: иначе вкладка закрылась бы с ошибкой.
+$dotEnvPath = Join-Path $mcpDir '.env'
+$botInEnv = [bool]$env:TELEGRAM_BOT_TOKEN
+$botInFile = (Test-Path -LiteralPath $dotEnvPath) -and
+    [bool](Select-String -LiteralPath $dotEnvPath -Pattern '^\s*TELEGRAM_BOT_TOKEN\s*=' -Quiet)
+if ($botInEnv -or $botInFile) {
+    wt -w 0 new-tab -p 'Windows PowerShell' -d $mcpDir --title 'Telegram Bot' cmd /c 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run_bot.ps1 & exit 0'
+    Write-Host 'Telegram Bot  ' -NoNewline
+    Write-Host '[OK] вкладка запущена (лог — в ней же)' -ForegroundColor Green
+} else {
+    Write-Host 'Telegram Bot  ' -NoNewline
+    Write-Host '[--] TELEGRAM_BOT_TOKEN не задан: см. docs/telegram-bot.md' -ForegroundColor DarkGray
+}
+
 Write-Host 'Все процессы запущены!' -ForegroundColor Green
