@@ -22,7 +22,7 @@ HELP = """MCP-бот: управление локальным MCP-серверо
 /plan <задача> — то же в режиме plan
 /task <id> — состояние, /tasks — последние, /stop <id> — остановить
 /ask <вопрос> — вопрос модели без действий
-Текст без «/» считается вопросом (/ask).
+Текст без «/» считается вопросом (/ask) и ничего не меняет: для действий нужен /exec.
 
 Сервер
 /status — связь с MCP, сервер, папка, сессия
@@ -92,6 +92,21 @@ class ChatState:
     last_task: str | None = None
     tasks: list[str] = field(default_factory=list)
     pending: Pending | None = None
+
+
+# Глаголы, по которым видно: человек просит действие, а не задаёт вопрос.
+ACTION_WORDS = (
+    "создай", "создать", "запиши", "записать", "измени", "изменить", "исправь", "правь",
+    "удали", "удалить", "запусти", "запустить", "выполни", "выполнить", "сделай", "сделать",
+    "добавь", "добавить", "переименуй", "скопируй", "перемести", "установи", "обнови",
+    "create", "write", "delete", "remove", "edit", "run", "execute", "make", "add", "update",
+)
+
+
+def looks_like_action(text: str) -> bool:
+    """Похоже ли сообщение на просьбу что-то сделать в папке (а не на вопрос)."""
+    low = (text or "").casefold()
+    return any(word in low for word in ACTION_WORDS)
 
 
 def parse_command(text: str) -> tuple[str, str] | None:
@@ -384,6 +399,12 @@ class BotService:
         answer = fmt.text_of(data) or "(пустой ответ)"
         usage = fmt.usage_line(data.get("usage"))
         text = f"{answer}\n\n{usage}" if usage else answer
+        if looks_like_action(prompt):
+            # /ask ничего не меняет: без подсказки человек думает, что задача выполнена
+            text += (
+                "\n\nℹ️ /ask только спрашивает и ничего не меняет в папке. "
+                "Чтобы бот это выполнил: /mode edits (или /mode all) и /exec <та же задача>."
+            )
         return self._answer_reply(text, "ask.txt")
 
     async def _cmd_mode(self, chat_id: int, arg: str = "") -> Reply:
@@ -485,6 +506,11 @@ class BotService:
                 f"Смотреть: /task {task_id}, остановить: /stop {task_id}."
             )
         card = self._task_card(task_id, status)
+        if mode == "plan":
+            card += (
+                "\n\nℹ️ Режим plan: изменения в папке не применялись. "
+                "Разрешить правки: /mode edits, затем повторите задачу."
+            )
         if message_id is not None:
             await self._edit(chat_id, message_id, fmt.split_text(card, self.cfg.max_message)[0])
         return Reply(card)

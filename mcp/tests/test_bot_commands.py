@@ -67,6 +67,18 @@ def test_plain_text_is_a_question():
     assert notifier.sent == []  # обычный ответ отправляет app.py, а не сервис
 
 
+def test_ask_hints_when_prompt_is_an_action():
+    bot, *_ = build({"ask": result({"text": "не смог создать файл: инструмент записи недоступен"})})
+    reply = ask(bot, "создай файл hello world.txt")
+    assert "/exec" in reply.text and "/mode edits" in reply.text
+
+
+def test_ask_question_has_no_action_hint():
+    bot, *_ = build({"ask": result({"text": "MCP — это протокол"})})
+    reply = ask(bot, "/ask что такое MCP?")
+    assert "ℹ️" not in reply.text
+
+
 def test_mode_changes_mode_of_this_chat():
     bot, *_ = build()
     assert "plan" in ask(bot, "/mode").text
@@ -202,6 +214,16 @@ def test_exec_reports_long_task():
     bot, *_ = build(answers, TELEGRAM_TASK_TIMEOUT="10", TELEGRAM_POLL_INTERVAL="2")
     reply = ask(bot, "/exec долго")
     assert "идёт дольше" in reply.text and "/stop t1" in reply.text
+
+
+def test_plan_task_explains_that_nothing_changed():
+    answers = {
+        "start_task": result({"taskId": "t1"}),
+        "task_status": result({"status": "done", "answer": "план готов"}),
+    }
+    bot, *_ = build(answers)
+    reply = ask(bot, "/plan создай файл hello.txt")
+    assert "Режим plan" in reply.text and "/mode edits" in reply.text
 
 
 def test_exec_retries_without_session_when_busy():
