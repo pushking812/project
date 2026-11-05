@@ -50,7 +50,7 @@ def test_help_lists_core_commands():
     bot, *_ = build()
     reply = ask(bot, "/help")
     assert reply.text == HELP
-    for word in ("/exec", "/plan", "/ask", "/stop", "/tools", "/call", "/svc"):
+    for word in ("/exec", "/plan", "/run", "/ask", "/stop", "/tools", "/call", "/svc"):
         assert word in reply.text
 
 
@@ -77,6 +77,68 @@ def test_ask_question_has_no_action_hint():
     bot, *_ = build({"ask": result({"text": "MCP — это протокол"})})
     reply = ask(bot, "/ask что такое MCP?")
     assert "ℹ️" not in reply.text
+
+
+def test_run_requires_command_and_edits_mode():
+    bot, worker, *_ = build()
+    assert "Формат: /run" in ask(bot, "/run").text
+    reply = ask(bot, "/run npm test")  # режим по умолчанию plan
+    assert "Режим plan" in reply.text and "/mode all" in reply.text
+    assert not worker.calls
+
+
+def test_run_refused_without_dangerous():
+    bot, worker, *_ = build()
+    ask(bot, "/mode all")
+    reply = ask(bot, "/run npm test")
+    assert "запрещён" in reply.text and "TELEGRAM_ALLOW_DANGEROUS" in reply.text
+    assert not worker.calls
+
+
+def test_run_confirms_and_returns_output():
+    answers = {"run_command": result({"ok": True, "code": 0, "output": "2 passed", "shown": "2 passed"})}
+    bot, worker, *_ = build(answers, TELEGRAM_ALLOW_DANGEROUS="1")
+    ask(bot, "/mode all")
+    reply = ask(bot, "/run npm test")
+    assert reply.keyboard and "npm test" in reply.text
+    done = asyncio.run(bot.handle_callback(1, f"cf:{token_of(reply)}:yes"))
+    assert worker.calls[-1] == ("run_command", {"command": "npm test", "mode": "all"})
+    assert done is not None and "2 passed" in done.text and "код 0" in done.text
+
+
+def test_run_with_timeout_and_background_app():
+    answers = {
+        "run_command": result(
+            {"ok": True, "code": None, "output": "started", "app": 1, "url": "http://localhost:5173"}
+        )
+    }
+    bot, worker, *_ = build(answers, TELEGRAM_ALLOW_DANGEROUS="1")
+    ask(bot, "/mode edits")
+    reply = ask(bot, "/run 30 npm run dev &")
+    assert "30 с" in reply.text
+    done = asyncio.run(bot.handle_callback(1, f"cf:{token_of(reply)}:yes"))
+    assert worker.calls[-1] == (
+        "run_command",
+        {"command": "npm run dev &", "mode": "edits", "timeout_sec": 30},
+    )
+    assert done is not None and "Приложение запущено" in done.text and "/apps stop" in done.text
+
+
+def test_run_reports_server_error():
+    bot, *_ = build(
+        {"run_command": result({"error": "the command did not end in 120 s"}, is_error=True)},
+        TELEGRAM_ALLOW_DANGEROUS="1",
+    )
+    ask(bot, "/mode all")
+    reply = ask(bot, "/run sleep 1000")
+    done = asyncio.run(bot.handle_callback(1, f"cf:{token_of(reply)}:yes"))
+    assert done is not None and "did not end" in done.text
+
+
+def test_cmd_alias_needs_confirmation():
+    bot, *_ = build(TELEGRAM_ALLOW_DANGEROUS="1")
+    ask(bot, "/mode all")
+    assert ask(bot, "/cmd npm test").keyboard is not None
 
 
 def test_mode_changes_mode_of_this_chat():

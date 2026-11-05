@@ -24,6 +24,11 @@ HELP = """MCP-бот: управление локальным MCP-серверо
 /ask <вопрос> — вопрос модели без действий
 Текст без «/» считается вопросом (/ask) и ничего не меняет: для действий нужен /exec.
 
+Команды в папке
+/run <команда> — выполнить команду (режим all или edits, с подтверждением)
+/run <секунды> <команда> — свой таймаут, до 600 с
+Команда с «&» в конце запускает приложение: смотреть /apps, остановить /apps stop <номер>.
+
 Сервер
 /status — связь с MCP, сервер, папка, сессия
 /mode [plan|edits|all] — режим задач
@@ -151,6 +156,7 @@ class BotService:
             "status": self._cmd_status, "health": self._cmd_health, "me": self._cmd_me,
             "tools": self._cmd_tools, "tool": self._cmd_tool, "call": self._cmd_call,
             "ask": self._cmd_ask, "mode": self._cmd_mode,
+            "run": self._cmd_run, "cmd": self._cmd_run,
             "exec": self._cmd_exec, "plan": self._cmd_plan,
             "task": self._cmd_task, "tasks": self._cmd_tasks, "stop": self._cmd_stop,
             "ws": self._cmd_ws, "cd": self._cmd_cd,
@@ -217,6 +223,20 @@ class BotService:
         text = fmt.pretty(res.text, self.cfg.max_message) if res.text.strip() else ""
         return Reply(text or "(пусто)", images=images)
 
+    def _command_reply(self, res: ToolResult) -> Reply:
+        """Ответ /run: код возврата, вывод и фоновое приложение (если команда с «&»)."""
+        data = fmt.payload(res.text)
+        output = str(data.get("output") or data.get("shown") or "").strip()
+        code = data.get("code")
+        head = "Команда выполнена" + (f", код {code}" if code is not None else "")
+        if data.get("app"):
+            head += f"\nПриложение запущено в фоне: #{data['app']}"
+            if data.get("url"):
+                head += f" {data['url']}"
+            head += "\nСписок: /apps, остановить: /apps stop <номер>"
+        text = f"{head}\n\n{output}" if output else head
+        return self._answer_reply(text, "command.txt")
+
     async def _notify(self, chat_id: int, text: str) -> int | None:
         if self.notifier is None:
             return None
@@ -265,7 +285,14 @@ class BotService:
             return await self._svc_action(pending.name)
         if pending.name in DANGEROUS and not self.cfg.dangerous:
             return Reply(f"{pending.name} в боте запрещён (TELEGRAM_ALLOW_DANGEROUS=1, чтобы разрешить).")
-        return self._result(await self._tool(pending.name, pending.args))
+        timeout = None
+        if pending.name == "run_command":
+            # команда ждёт свой таймаут на сервере: не обрываем её раньше
+            timeout = min(float(pending.args.get("timeout_sec") or 120) + 45.0, 700.0)
+        res = await self._tool(pending.name, pending.args, timeout)
+        if pending.name == "run_command" and not res.is_error:
+            return self._command_reply(res)
+        return self._result(res)
 
     # --- справка и состояние -------------------------------------------------------------------
 
@@ -406,6 +433,36 @@ class BotService:
                 "Чтобы бот это выполнил: /mode edits (или /mode all) и /exec <та же задача>."
             )
         return self._answer_reply(text, "ask.txt")
+
+    async def _cmd_run(self, chat_id: int, arg: str = "") -> Reply:
+        """`/run [секунды] <команда>`: прямой вызов run_command, без модели."""
+        raw = (arg or "").strip()
+        if not raw:
+            return Reply(
+                "Формат: /run <команда>, например /run npm test\n"
+                "Свой таймаут: /run 300 npm test (до 600 с)\n"
+                "Нужен режим all или edits: /mode all"
+            )
+        timeout_sec = None
+        parts = raw.split(maxsplit=1)
+        if len(parts) == 2 and parts[0].isdigit():
+            timeout_sec, raw = min(int(parts[0]), 600), parts[1].strip()
+            if not raw:
+                return Reply("После таймаута нужна команда: /run 300 npm test")
+        state = self._state(chat_id)
+        if state.mode == "plan":
+            return Reply(
+                "Режим plan: команды запрещены. Смените режим: /mode all (или /mode edits) и повторите."
+            )
+        refusal = self._danger_refusal("run_command")
+        if refusal:
+            return refusal
+        args: dict = {"command": raw, "mode": state.mode}
+        if timeout_sec:
+            args["timeout_sec"] = timeout_sec
+        label = f"Выполнить команду ({timeout_sec} с): {fmt.clip(raw, 300)}" if timeout_sec \
+            else f"Выполнить команду: {fmt.clip(raw, 300)}"
+        return self._confirm(chat_id, "tool", "run_command", args, label)
 
     async def _cmd_mode(self, chat_id: int, arg: str = "") -> Reply:
         state = self._state(chat_id)
