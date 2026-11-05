@@ -1,0 +1,1387 @@
+Техническое задание: Этап 5 — Сессии, workspace, анализ файлов через ask
+
+Проект: ask-code-mcp
+Дата: 2026-11-03
+Версия документа: 1.0
+Зависит от: Этапы 1–4 (Node API, Python MCP 52 инструмента, progress notifications)
+Приоритет: высокий (закрывает функциональные пробелы, выявленные в аудите)
+1. Цель этапа
+
+Закрыть четыре пробела, выявленных при анализе предложений:
+
+    Сессии и память — сделать сохранение истории/памяти/заметок автоматическим в Python MCP, а не опциональным.
+
+    Workspace — дать возможность менять текущую рабочую папку в рантайме с проверкой безопасности.
+
+    Анализ файлов через ask — передавать файл в ask-сервер по ссылке (пути), а не данными, чтобы модель ask сама анализировала.
+
+    Текстовые и файловые запросы — обёртки для типовых сценариев (ask_review, ask_summarize, ask_plan).
+
+Этап разбит на 5А (сессии + workspace) и 5Б (файлы + обёртки). 5В — опционально.
+2. Границы этапа
+Входит (5А)
+
+    Автосессия в Python MCP (ASK_SESSION_ID или автогенерация).
+
+    Инструменты ask_session_new, ask_session_resume, ask_session_list, ask_session_info.
+
+    Node: POST /workspace, GET /workspace.
+
+    Python: ask_set_workspace, ask_get_workspace.
+
+    Allowlist ASK_ALLOWED_ROOTS.
+
+    Пересчёт memoryDir, historyFile, ctx.browser, ctx.apps при смене корня.
+
+    Запрет смены корня при активных задачах.
+
+Входит (5Б)
+
+    Node: files в POST /ask и POST /execute (пути, не данные).
+
+    Node: output_files в ответе /execute (отслеживание write-операций).
+
+    Python: files в ask_ask, ask_execute.
+
+    Python: ask_analyze(path, prompt, mode).
+
+    Python: обёртки ask_review, ask_summarize, ask_explain, ask_plan.
+
+    Адаптер формата files для ask API (с конфигом).
+
+Не входит
+
+    Аутентификация HTTP API (по-прежнему loopback).
+
+    Специализированные сценарии (ask_market, ask_diff_review) — этап 5В.
+
+    Стриминг ответа (есть OpenAI-прокси).
+
+    Изменение существующих контрактов (только расширение).
+
+Допущения
+
+    ask API /v1/ask принимает files — точный формат уточняется в Commit 52 (адаптер).
+
+    Cline поддерживает передачу путей как строк.
+
+    ASK_KEY валиден.
+
+3. Термины
+Термин	Значение
+Workspace	Текущая рабочая папка (ctx.root), от которой считаются memoryDir, historyFile, относительные пути
+Allowlist	Список разрешённых корней (ASK_ALLOWED_ROOTS), вне которых workspace менять нельзя
+Auto-session	Автоматически выбранный session_id при старте Python MCP
+Files (пути)	Список относительных или абсолютных путей к файлам, которые Node читает локально и передаёт в ask API
+Output files	Файлы, созданные моделью в ходе /execute, возвращаемые как пути
+4. Этап 5А: Сессии и workspace
+4.1. Автосессия в Python MCP
+
+Проблема: сейчас ask_execute/ask_start передают session_id только если Cline укажет явно. По умолчанию — stateless, история теряется между вызовами.
+
+Решение: при старте mcp/server.py выбрать session_id:
+
+    Если ASK_SESSION_ID в env — использовать его.
+
+    Иначе — сгенерировать uuid4() и сохранить в ~/.config/ask-code/mcp-session (файл, 0600), чтобы пережить перезапуск.
+
+    Передавать session_id во все ask_execute/ask_start по умолчанию.
+
+Требования:
+
+    При первом запуске: session_id = uuid4(), сохранить.
+
+    При последующих: прочитать из файла.
+
+    ASK_SESSION_ID переопределяет файл (для CI/тестов).
+
+    ASK_SESSION_AUTO=false → старое поведение (stateless).
+
+Env:
+Переменная	Default	Описание
+ASK_SESSION_ID	—	Явный ID; переопределяет файл
+ASK_SESSION_AUTO	true	Автосессия включена
+ASK_SESSION_FILE	~/.config/ask-code/mcp-session	Где хранить ID
+4.2. Python-инструменты сессий
+text
+
+ask_session_new(title?: str)    → { session_id, title }
+ask_session_resume(id: str)     → { session_id, history_count, title }
+ask_session_list()              → { sessions: [{id, title, requests, savedAt, current}] }
+ask_session_info()              → { session_id, title, requests, savedAt }
+
+Поведение:
+
+    ask_session_new → POST /sessions {folder: ROOT, title} → сохранить session_id в памяти MCP и файле.
+
+    ask_session_resume → POST /sessions/resume {folder, id} → переключить.
+
+    ask_session_list → GET /sessions?folder=ROOT.
+
+    ask_session_info → GET /sessions/:id (текущий).
+
+Ошибки: 404 (нет сессии), 409 (уже текущая) → McpError с понятным сообщением.
+4.3. Node API: POST /workspace, GET /workspace
+GET /workspace
+json
+
+200 OK
+{
+  "ok": true,
+  "root": "/home/user/project",
+  "allowedRoots": ["/home/user/project", "/home/user/projects"],
+  "sessionId": "abc-123"
+}
+
+POST /workspace
+
+Тело:
+json
+
+{ "path": "/home/user/projects/foo" }
+
+Ответ:
+json
+
+200 OK
+{ "ok": true, "root": "/home/user/projects/foo", "changed": true }
+
+Поведение:
+
+    realpath(path) → newRoot.
+
+    Проверка: newRoot в allowedRoots (см. §4.4), иначе 403 code: "not_allowed".
+
+    Проверка: нет активных задач (running > 0), иначе 409 code: "tasks_running".
+
+    Проверка: newRoot существует и директория, иначе 404.
+
+    ctx.root = newRoot.
+
+    Пересчёт: ctx.memoryDir = memoryDir(SITE, newRoot), ctx.historyFile = historyFile(SITE, newRoot, sessionId).
+
+    ctx.browser?.close() → ctx.browser = null (профиль per-root, см. §4.5).
+
+    ctx.apps.stopAll().
+
+    ctx.watches?.stopAll().
+
+    writeSessionFile(sessionId) — новый файл в новой папке.
+
+    Лог: [INFO] [workspace] root=/new/path.
+
+Ошибки:
+Код	code	Причина
+400	invalid_path	Не строка, пустая, содержит control chars
+403	not_allowed	Вне allowlist
+404	not_found	Не существует / не директория
+409	tasks_running	Есть активные задачи
+4.4. Allowlist ASK_ALLOWED_ROOTS
+
+Env: ASK_ALLOWED_ROOTS — список через : (Unix) или ; (Windows).
+
+Default: $HOME + ASK_ROOT (если ASK_ROOT вне $HOME).
+
+Правила:
+
+    Каждый элемент — realpath.
+
+    newRoot должен быть внутри одного из allowedRoots (или равен ему).
+
+    Запрет на системные корни (/, /etc, /usr, /var, /bin, /sbin, /boot) — даже если в allowlist, 403 code: "system_path".
+
+    Запрет на $HOME целиком (можно только подпапки) — 403 code: "home_forbidden", если newRoot === $HOME. Причина: ~/.ssh, ~/.config/ask-code/*.key не должны быть доступны как root.
+
+    ASK_ALLOWED_ROOTS не может содержать / или $HOME (валидация при старте, exit(1)).
+
+Пример:
+bash
+
+ASK_ALLOWED_ROOTS="/home/user/projects:/home/user/work" node ask-code-server.mjs
+
+4.5. Пересчёт зависимых сущностей
+Сущность	При смене root
+ctx.root	newRoot
+ctx.memoryDir	memoryDir(SITE, newRoot) — новый каталог
+ctx.historyFile	historyFile(SITE, newRoot, sessionId) — новый файл
+ctx.state.history	[] (новая сессия)
+ctx.state.title	null
+ctx.browser	close() → null (lazy init при следующем /browser)
+ctx.apps	stopAll()
+ctx.watches	stopAll()
+ctx.allowedSites	clear() (сайты могли быть для другого проекта)
+ctx.state.model	сохраняется (модель не зависит от папки)
+
+Браузерный профиль per-root (опционально, приоритет P2): AskBrowser(newRoot, { dir: /var/ask/browsers/<hash(newRoot)> }) — чтобы логины/куки не смешивались между проектами. В 5А — просто close() (профиль общий, но закрывается).
+4.6. Python-инструменты workspace
+text
+
+ask_set_workspace(path: str)  → { root, changed }
+ask_get_workspace()           → { root, allowedRoots, sessionId }
+
+Поведение:
+
+    ask_set_workspace → POST /workspace → обновить локальный ROOT в Python (для относительных путей в других инструментах).
+
+    ask_get_workspace → GET /workspace.
+
+    При смене: Python также обновляет session_id (новый файл в новой папке), если автосессия включена.
+
+Ошибки: пробрасываются как McpError с текстом из Node.
+4.7. Относительные пути после смены workspace
+
+Требование: после ask_set_workspace все инструменты, принимающие path/folder, разрешают относительные пути от нового root.
+
+Проверка: ask_read_file("src/a.js") после смены на /home/user/projects/foo читает /home/user/projects/foo/src/a.js.
+
+Реализация: Python хранит ROOT в глобальной переменной, обновляет при ask_set_workspace; передаёт path в Node как есть (Node сам разрешает от ctx.root).
+5. Этап 5Б: Анализ файлов через ask
+5.1. Проблема и решение
+
+Проблема: сейчас Cline может прочитать файл через read_file (получить данные) и сам анализировать — но Cline работает на модели ask через прокси, и это двойной расход (Cline думает + ask думает). Или делегировать ask_execute(prompt) — но файл в промпт не попадёт.
+
+Решение: передавать файл в ask-сервер как files (пути), Node читает локально, отправляет в /v1/ask или /v1/code. Модель ask анализирует и возвращает ответ. Cline получает готовый результат.
+5.2. Адаптер формата files (Commit 52, блокер)
+
+Проблема: точный формат files в /v1/ask неизвестен. В /v1/code (из ask-code.mjs) — {kind: "image", name, mediaType, data}. Для текста, вероятно, {kind: "text", name, text}.
+
+Решение: адаптер с конфигом.
+
+Env:
+Переменная	Default	Описание
+ASK_FILES_FORMAT	auto	auto|code|text|image
+ASK_FILES_MAX	5	Макс. файлов в запросе
+ASK_FILES_MAX_BYTES	30000000	Общий размер (30 MB)
+
+Поведение auto:
+
+    При старте Node делает GET /v1/docs (или GET /v1/me) и ищет схему files.
+
+    Если не найдено — использует формат code (как в ask-code.mjs).
+
+    Логирует выбранный формат.
+
+Форматы:
+
+    code: {kind: "image"|"text", name, mediaType?, data?, text?} — как в /v1/code.
+
+    text: {name, text} (для /v1/ask, если он не принимает изображения).
+
+    image: {name, mediaType, data} (base64).
+
+Требование: адаптер покрыт юнит-тестами на все три формата.
+5.3. Node: files в POST /ask
+
+Тело:
+json
+
+{
+  "prompt": "проанализируй и дай краткое описание",
+  "files": ["hello.xlsx", "report.pdf"],
+  "useContext": true
+}
+
+Поведение:
+
+    Для каждого пути:
+
+        inside(root, path) → 403 code: "outside" если вне корня.
+
+        isSecret(basename(path)) → 403 code: "secret".
+
+        readOne(root, {path}) → {output, images, note}.
+
+    Классификация:
+
+        Текст (.py, .js, .md, .txt, …) → {kind: "text", name, text}.
+
+        Изображение (.png, .jpg, .heic, …) → {kind: "image", name, mediaType, data} (через pictureOf).
+
+        PDF → текст через readPdf + изображения страниц → {kind: "text", name, text} + опционально images.
+
+        Office (.xlsx, .docx, …) → текст через officeText → {kind: "text", name, text}.
+
+    Лимиты:
+
+        files.length > ASK_FILES_MAX → 413 code: "too_many_files".
+
+        Сумма data.length (base64) > ASK_FILES_MAX_BYTES → 413 code: "too_large".
+
+        Текст > 200 000 символов → обрезать с пометкой … (truncated).
+
+    Собрать files в формате адаптера.
+
+    Отправить в /v1/ask с system (если useContext).
+
+    SSE-проксирование как обычно.
+
+Ошибки:
+Код	code	Причина
+400	invalid_files	files не массив, пустые элементы
+403	outside	Вне корня
+403	secret	Секретный файл
+404	not_found	Файл не существует
+413	too_many_files	> 5
+413	too_large	> 30 MB
+5.4. Node: files в POST /execute
+
+Тело:
+json
+
+{
+  "prompt": "проанализируй hello.xlsx и создай report.xlsx с выводами",
+  "files": ["hello.xlsx"],
+  "mode": "all",
+  "session_id": "abc"
+}
+
+Поведение: как в /ask, но файлы передаются в /v1/code (в первом запросе). Модель может использовать read_excel/read_word повторно.
+5.5. Node: output_files в POST /execute
+
+Проблема: модель может создать файл (write_file, write_excel, write_word), но Cline не знает, какой. steps содержит wrote report.xlsx, но парсить строки — хрупко.
+
+Решение: отслеживать write-операции в doTool.
+
+Реализация:
+js
+
+// lib/executor.mjs
+ctx.writtenFiles = new Set();  // в makeCtx
+
+// в doTool, после успешного applyChange:
+if (name === 'write_file' || name === 'edit_file') {
+  ctx.writtenFiles.add(change.rel);
+}
+// для write_excel/write_word — аналогично (если это отдельные tools в ask-code)
+
+В ответе /execute (событие done):
+json
+
+event: done
+data: {
+  "answer": "...",
+  "steps": ["wrote report.xlsx"],
+  "output_files": ["report.xlsx"],
+  "usage": {...}
+}
+
+В GET /status/:id: поле outputFiles: ["report.xlsx"].
+
+Требование: output_files — только файлы, созданные/изменённые моделью (не прочитанные). Пути — относительные от root.
+5.6. Python: files в ask_ask и ask_execute
+
+Сигнатуры:
+python
+
+@mcp.tool()
+async def ask_ask(prompt: str, files: list[str] = None, use_context: bool = True) -> str:
+    """Ask with optional files (paths) and project context."""
+
+@mcp.tool()
+async def ask_execute(prompt: str, files: list[str] = None, mode: str = "all", ctx: Context = None) -> str:
+    """Autonomous task with optional files (paths). Returns answer + output_files."""
+
+Поведение: пробрасывают files в Node как есть; Node разрешает от ROOT.
+
+Возврат ask_execute:
+json
+
+{
+  "answer": "...",
+  "output_files": ["report.xlsx"]
+}
+
+(не просто answer, как раньше — расширение контракта, backward-compatible: если output_files пуст, поле можно опустить).
+5.7. Python: ask_analyze(path, prompt, mode)
+
+Сигнатура:
+python
+
+@mcp.tool()
+async def ask_analyze(path: str, prompt: str, mode: str = "read") -> str:
+    """Analyze a file via ask server. mode='read' — /ask (no tools, fast);
+    mode='write' — /execute (model may create output files)."""
+
+Поведение:
+
+    mode="read" → POST /ask {prompt, files: [path], useContext: true} → вернуть текст.
+
+    mode="write" → POST /execute {prompt, files: [path], mode: "all"} → вернуть {answer, output_files}.
+
+    Валидация mode: read|write, иначе McpError.
+
+Пример:
+text
+
+ask_analyze("hello.xlsx", "дай краткое описание содержимого", mode="read")
+→ "Файл содержит 3 листа: ..."
+
+ask_analyze("hello.py", "сделай ревью кода", mode="read")
+→ "Код в целом корректен, но ..."
+
+5.8. Python: обёртки
+python
+
+@mcp.tool()
+async def ask_review(path: str) -> str:
+    """Review code or document for bugs, risks, improvements."""
+    return await ask_analyze(path, REVIEW_PROMPT, mode="read")
+
+@mcp.tool()
+async def ask_summarize(path: str) -> str:
+    """Give a concise summary of a file's contents."""
+    return await ask_analyze(path, "Дай краткое описание содержимого этого файла.", mode="read")
+
+@mcp.tool()
+async def ask_explain(path: str) -> str:
+    """Explain what this code or document does."""
+    return await ask_analyze(path, "Объясни, что делает этот код/документ, для чего он.", mode="read")
+
+@mcp.tool()
+async def ask_plan(prompt: str) -> str:
+    """Make a plan for a task without doing it."""
+    return await ask_ask(f"Составь подробный план для задачи: {prompt}. Не выполняй, только план.", use_context=True)
+
+Промпты:
+
+    REVIEW_PROMPT — уже есть в ask-code.mjs (REVIEW_PROMPT), переиспользовать.
+
+    Для ask_summarize/ask_explain — короткие, на языке пользователя (по ASK_LANG).
+
+5.9. Обработка ошибок
+
+Все ошибки Node (400, 403, 404, 413) → McpError с текстом из {error}. Cline видит понятное сообщение.
+
+Особый случай: 413 too_large → сообщение «файл слишком большой (N MB, максимум 30 MB). Попробуйте разбить или использовать read_file + ask_ask с текстом».
+6. План коммитов
+Этап 5А (сессии + workspace)
+#	Сообщение	Что	Тест
+45	feat(mcp): auto-session (ASK_SESSION_ID, file, tools)	Автосессия + ask_session_new/resume/list/info	Перезапуск MCP → resume → история на месте; ASK_SESSION_ID переопределяет
+46	feat(server): GET /workspace, POST /workspace	Эндпоинты + валидация + пересчёт	POST /workspace меняет root; GET возвращает
+47	feat(server): ASK_ALLOWED_ROOTS, security checks	Allowlist, запрет системных путей и $HOME	POST /workspace /etc → 403; POST /workspace $HOME → 403; POST /workspace /allowed/sub → 200
+48	feat(server): workspace change — browser/apps/watches cleanup	close(), stopAll(), clear()	После смены: старый browser закрыт, apps остановлены
+49	feat(mcp): ask_set_workspace, ask_get_workspace	Python-инструменты + обновление ROOT	ask_set_workspace → ask_read_file("src/a.js") читает из нового корня
+50	test: workspace + session integration	Полный цикл: сессия → задача → смена workspace → новая сессия	pytest + npm test зелёные
+51	docs: workspace and sessions in README	Разделы про автосессию, workspace, allowlist	Следование docs → рабочая установка
+
+Оценка 5А: ~2.5 дня.
+Этап 5Б (файлы + обёртки)
+#	Сообщение	Что	Тест
+52	feat(server): files format adapter (auto/code/text/image)	Адаптер + discovery + env	Юнит-тесты на 3 формата; auto выбирает корректно
+53	feat(server): files in POST /ask	Чтение локально, классификация, лимиты, отправка	/ask с .xlsx → ответ; .env → 403; ../../etc/passwd → 403; 6 файлов → 413
+54	feat(server): files in POST /execute	То же для /execute	/execute с .xlsx → модель видит файл
+55	feat(server): output_files tracking in /execute	ctx.writtenFiles, output_files в done и /status	/execute «создай report.xlsx» → output_files: ["report.xlsx"]
+56	feat(mcp): files in ask_ask and ask_execute	Python пробрасывает files	ask_execute("анализ", files=["hello.xlsx"]) → ответ
+57	feat(mcp): ask_analyze tool	mode=read|write, валидация	ask_analyze("hello.py", "ревью") → текст; mode=write → {answer, output_files}
+58	feat(mcp): wrapper tools (ask_review, ask_summarize, ask_explain, ask_plan)	4 обёртки	Каждая возвращает осмысленный ответ
+59	test: files + analyze integration	Полный цикл: .xlsx, .pdf, .py; создание report.xlsx	pytest + npm test зелёные
+60	docs: files and analysis in README, MCP_TOOLS.md	Формат files, лимиты, примеры	Следование docs → рабочая установка
+
+Оценка 5Б: ~3.5 дня.
+Этап 5В (опционально)
+#	Сообщение	Что
+61	feat(mcp): ask_market (browser-backed analysis)	ask_execute(prompt, browser=true) с готовым промптом
+62	feat(mcp): ask_diff_review	git diff → ask_analyze
+63	feat(mcp): ask_test_plan	Анализ кода → план тестов
+
+Оценка 5В: ~1.5 дня (после 5Б).
+7. Критерии приёмки
+Этап 5А
+
+    При старте Python MCP создаётся session_id, сохраняется в ~/.config/ask-code/mcp-session.
+
+    Перезапуск MCP → ask_session_info показывает тот же session_id.
+
+    ask_execute без явного session_id использует автосессию → история растёт.
+
+    ask_session_new → новый session_id, старый в ask_session_list.
+
+    ask_session_resume(id) → переключение, история загружена.
+
+    GET /workspace → {root, allowedRoots, sessionId}.
+
+    POST /workspace /allowed/sub → 200, root изменён.
+
+    POST /workspace /etc → 403 code: "system_path".
+
+    POST /workspace $HOME → 403 code: "home_forbidden".
+
+    POST /workspace /outside → 403 code: "not_allowed".
+
+    POST /workspace при активной задаче → 409 code: "tasks_running".
+
+    После смены workspace: memoryDir новый, historyFile новый, browser закрыт, apps остановлены.
+
+    ask_set_workspace → ask_read_file("src/a.js") читает из нового корня.
+
+    ASK_ALLOWED_ROOTS с / → exit(1) при старте.
+
+    ASK_SESSION_AUTO=false → stateless (старое поведение).
+
+Этап 5Б
+
+    Адаптер files: auto выбирает формат, code/text/image — явно.
+
+    POST /ask с files: ["hello.xlsx"] → ответ модели с анализом.
+
+    POST /ask с files: [".env"] → 403 code: "secret".
+
+    POST /ask с files: ["../../etc/passwd"] → 403 code: "outside".
+
+    POST /ask с 6 файлами → 413 code: "too_many_files".
+
+    POST /ask с файлом > 30 MB → 413 code: "too_large".
+
+    POST /ask с .pdf → текст PDF передан, ответ содержит анализ.
+
+    POST /ask с .png → изображение передано (если формат image/code).
+
+    POST /execute с files → модель видит файл, может read_excel повторно.
+
+    POST /execute «создай report.xlsx» → output_files: ["report.xlsx"].
+
+    GET /status/:id → outputFiles: ["report.xlsx"].
+
+    ask_ask("анализ", files=["hello.xlsx"]) → ответ.
+
+    ask_execute("анализ", files=["hello.xlsx"]) → {answer, output_files}.
+
+    ask_analyze("hello.py", "ревью", mode="read") → текст ревью.
+
+    ask_analyze("hello.xlsx", "создай отчёт", mode="write") → {answer, output_files: ["report.xlsx"]}.
+
+    ask_analyze(..., mode="invalid") → McpError.
+
+    ask_review("hello.py") → ревью.
+
+    ask_summarize("hello.xlsx") → краткое описание.
+
+    ask_explain("hello.py") → объяснение.
+
+    ask_plan("добавить тесты") → план.
+
+Безопасность (сводно)
+
+    ASK_KEY не утекает в files, логи, ответы.
+
+    files не читают .env, ключи.
+
+    files не выходят за root.
+
+    Workspace не выходит за allowedRoots.
+
+    Workspace не меняется при активных задачах.
+
+Совместимость
+
+    Все 52 существующих инструмента работают без изменений.
+
+    ask_execute без files — как раньше.
+
+    ask_ask без files — как раньше.
+
+    Старые версии Python MCP — не ломаются (новые поля опциональны).
+
+8. Риски и митигация
+Риск	Вероятность	Влияние	Митигация
+Формат files в /v1/ask неизвестен	Высокая	Высокое	Адаптер + ASK_FILES_FORMAT; discovery через /v1/docs; fallback на code
+/v1/ask не принимает Office/PDF	Средняя	Среднее	Конвертировать в текст через officeText/readPdf; передавать как {kind: "text"}
+Модель не возвращает файл в /v1/ask	Высокая	Низкое	Для файла-результата — /execute (mode=write)
+Смена workspace ломает относительные пути в Python	Средняя	Высокое	Python хранит ROOT, обновляет при ask_set_workspace; тест
+ASK_ALLOWED_ROOTS пуст → нельзя сменить root	Средняя	Низкое	Default $HOME; документировать
+Браузерный профиль смешивается между проектами	Средняя	Среднее	В 5А — close() при смене; в 5В — per-root dir
+output_files не отслеживает Office-tools	Средняя	Среднее	Явно добавить в doTool для write_excel/write_word
+Cline не передаёт files (старая версия)	Низкая	Низкое	files опционален; без него — старое поведение
+Большие файлы (100 MB Excel)	Средняя	Среднее	Лимит 30 MB, 413; рекомендация разбить
+Секреты в имени файла (hello.env.txt)	Низкая	Среднее	isSecret(basename) ловит .env в конце; тест
+9. Definition of Done
+5А
+
+    □
+
+    Коммиты 45–51 смёржены.
+    □
+
+    npm test + pytest mcp/tests/ — зелёные.
+    □
+
+    Автосессия работает (перезапуск → resume).
+    □
+
+    ask_set_workspace работает, allowlist проверяется.
+    □
+
+    POST /workspace /etc → 403.
+    □
+
+    Смена workspace при активной задаче → 409.
+    □
+
+    README: разделы «Sessions», «Workspace», «ASK_ALLOWED_ROOTS».
+
+5Б
+
+    □
+
+    Коммиты 52–60 смёржены.
+    □
+
+    npm test + pytest mcp/tests/ — зелёные.
+    □
+
+    POST /ask с .xlsx, .pdf, .py — работают.
+    □
+
+    POST /ask с .env, ../../etc/passwd — 403.
+    □
+
+    POST /execute с files → output_files.
+    □
+
+    ask_analyze, ask_review, ask_summarize, ask_explain, ask_plan — работают.
+    □
+
+    README: раздел «Files and analysis», лимиты, примеры.
+    □
+
+    MCP_TOOLS.md обновлён (новые инструменты, files параметр).
+
+Общее
+
+    □
+
+    Все 52 старых инструмента работают.
+    □
+
+    ASK_KEY не утекает.
+    □
+
+    Нет console.log в Node.
+    □
+
+    Cline (вручную) вызывает ask_analyze("hello.xlsx", "описание") → ответ.
+
+10. Оценка
+Этап	Коммиты	Оценка
+5А (сессии + workspace)	45–51	2.5 дня
+5Б (файлы + обёртки)	52–60	3.5 дня
+5В (опционально)	61–63	1.5 дня
+Итого 5А+5Б	16 коммитов	~6 дней
+Буфер (адаптер files, Cline-специфика)		+1.5 дня
+Итого с буфером		~7.5 дней
+11. Открытые вопросы (закрыть до старта)
+
+    Формат files в /v1/ask — уточнить в https://ask.oryxml.com/v1/docs. Если недоступно — Commit 52 (адаптер) начнётся с ASK_FILES_FORMAT=code (как в ask-code.mjs).
+
+    /v1/ask и Office — если не принимает, Commit 53 конвертирует в текст. Проверить на .xlsx.
+
+    write_excel/write_word в doTool — есть ли они как отдельные tools в ask-code.mjs? Если да — добавить в ctx.writtenFiles. Если нет (Office пишется через write_file с base64?) — уточнить.
+
+    Cline и files — как Cline передаёт пути? Строкой или объектом? Проверить в текущей версии; если объектом — адаптировать сигнатуру Python.
+
+12. Ссылки
+
+    ask-code.mjs — readOne, officeText, readPdf, pictureOf, isSecret, inside
+
+    docs/api-stage2.md — текущий контракт /ask, /execute
+
+    MCP_TOOLS.md — 52 инструмента
+
+    ask API docs: https://ask.oryxml.com/v1/docs (формат files)
+
+    MCP spec: tools/call, Context (FastMCP)
+
+Если нужно — могу расписать детально любой коммит (точные сигнатуры, псевдокод, тестовые сценарии), или подготовить промпт для AI-агента на этап 5А/5Б (по образцу этапа 1).Техническое задание: Этап 5 — Сессии, workspace, анализ файлов через ask
+
+Проект: ask-code-mcp
+Дата: 2026-11-03
+Версия документа: 1.0
+Зависит от: Этапы 1–4 (Node API, Python MCP 52 инструмента, progress notifications)
+Приоритет: высокий (закрывает функциональные пробелы, выявленные в аудите)
+1. Цель этапа
+
+Закрыть четыре пробела, выявленных при анализе предложений:
+
+    Сессии и память — сделать сохранение истории/памяти/заметок автоматическим в Python MCP, а не опциональным.
+
+    Workspace — дать возможность менять текущую рабочую папку в рантайме с проверкой безопасности.
+
+    Анализ файлов через ask — передавать файл в ask-сервер по ссылке (пути), а не данными, чтобы модель ask сама анализировала.
+
+    Текстовые и файловые запросы — обёртки для типовых сценариев (ask_review, ask_summarize, ask_plan).
+
+Этап разбит на 5А (сессии + workspace) и 5Б (файлы + обёртки). 5В — опционально.
+2. Границы этапа
+Входит (5А)
+
+    Автосессия в Python MCP (ASK_SESSION_ID или автогенерация).
+
+    Инструменты ask_session_new, ask_session_resume, ask_session_list, ask_session_info.
+
+    Node: POST /workspace, GET /workspace.
+
+    Python: ask_set_workspace, ask_get_workspace.
+
+    Allowlist ASK_ALLOWED_ROOTS.
+
+    Пересчёт memoryDir, historyFile, ctx.browser, ctx.apps при смене корня.
+
+    Запрет смены корня при активных задачах.
+
+Входит (5Б)
+
+    Node: files в POST /ask и POST /execute (пути, не данные).
+
+    Node: output_files в ответе /execute (отслеживание write-операций).
+
+    Python: files в ask_ask, ask_execute.
+
+    Python: ask_analyze(path, prompt, mode).
+
+    Python: обёртки ask_review, ask_summarize, ask_explain, ask_plan.
+
+    Адаптер формата files для ask API (с конфигом).
+
+Не входит
+
+    Аутентификация HTTP API (по-прежнему loopback).
+
+    Специализированные сценарии (ask_market, ask_diff_review) — этап 5В.
+
+    Стриминг ответа (есть OpenAI-прокси).
+
+    Изменение существующих контрактов (только расширение).
+
+Допущения
+
+    ask API /v1/ask принимает files — точный формат уточняется в Commit 52 (адаптер).
+
+    Cline поддерживает передачу путей как строк.
+
+    ASK_KEY валиден.
+
+3. Термины
+Термин	Значение
+Workspace	Текущая рабочая папка (ctx.root), от которой считаются memoryDir, historyFile, относительные пути
+Allowlist	Список разрешённых корней (ASK_ALLOWED_ROOTS), вне которых workspace менять нельзя
+Auto-session	Автоматически выбранный session_id при старте Python MCP
+Files (пути)	Список относительных или абсолютных путей к файлам, которые Node читает локально и передаёт в ask API
+Output files	Файлы, созданные моделью в ходе /execute, возвращаемые как пути
+4. Этап 5А: Сессии и workspace
+4.1. Автосессия в Python MCP
+
+Проблема: сейчас ask_execute/ask_start передают session_id только если Cline укажет явно. По умолчанию — stateless, история теряется между вызовами.
+
+Решение: при старте mcp/server.py выбрать session_id:
+
+    Если ASK_SESSION_ID в env — использовать его.
+
+    Иначе — сгенерировать uuid4() и сохранить в ~/.config/ask-code/mcp-session (файл, 0600), чтобы пережить перезапуск.
+
+    Передавать session_id во все ask_execute/ask_start по умолчанию.
+
+Требования:
+
+    При первом запуске: session_id = uuid4(), сохранить.
+
+    При последующих: прочитать из файла.
+
+    ASK_SESSION_ID переопределяет файл (для CI/тестов).
+
+    ASK_SESSION_AUTO=false → старое поведение (stateless).
+
+Env:
+Переменная	Default	Описание
+ASK_SESSION_ID	—	Явный ID; переопределяет файл
+ASK_SESSION_AUTO	true	Автосессия включена
+ASK_SESSION_FILE	~/.config/ask-code/mcp-session	Где хранить ID
+4.2. Python-инструменты сессий
+text
+
+ask_session_new(title?: str)    → { session_id, title }
+ask_session_resume(id: str)     → { session_id, history_count, title }
+ask_session_list()              → { sessions: [{id, title, requests, savedAt, current}] }
+ask_session_info()              → { session_id, title, requests, savedAt }
+
+Поведение:
+
+    ask_session_new → POST /sessions {folder: ROOT, title} → сохранить session_id в памяти MCP и файле.
+
+    ask_session_resume → POST /sessions/resume {folder, id} → переключить.
+
+    ask_session_list → GET /sessions?folder=ROOT.
+
+    ask_session_info → GET /sessions/:id (текущий).
+
+Ошибки: 404 (нет сессии), 409 (уже текущая) → McpError с понятным сообщением.
+4.3. Node API: POST /workspace, GET /workspace
+GET /workspace
+json
+
+200 OK
+{
+  "ok": true,
+  "root": "/home/user/project",
+  "allowedRoots": ["/home/user/project", "/home/user/projects"],
+  "sessionId": "abc-123"
+}
+
+POST /workspace
+
+Тело:
+json
+
+{ "path": "/home/user/projects/foo" }
+
+Ответ:
+json
+
+200 OK
+{ "ok": true, "root": "/home/user/projects/foo", "changed": true }
+
+Поведение:
+
+    realpath(path) → newRoot.
+
+    Проверка: newRoot в allowedRoots (см. §4.4), иначе 403 code: "not_allowed".
+
+    Проверка: нет активных задач (running > 0), иначе 409 code: "tasks_running".
+
+    Проверка: newRoot существует и директория, иначе 404.
+
+    ctx.root = newRoot.
+
+    Пересчёт: ctx.memoryDir = memoryDir(SITE, newRoot), ctx.historyFile = historyFile(SITE, newRoot, sessionId).
+
+    ctx.browser?.close() → ctx.browser = null (профиль per-root, см. §4.5).
+
+    ctx.apps.stopAll().
+
+    ctx.watches?.stopAll().
+
+    writeSessionFile(sessionId) — новый файл в новой папке.
+
+    Лог: [INFO] [workspace] root=/new/path.
+
+Ошибки:
+Код	code	Причина
+400	invalid_path	Не строка, пустая, содержит control chars
+403	not_allowed	Вне allowlist
+404	not_found	Не существует / не директория
+409	tasks_running	Есть активные задачи
+4.4. Allowlist ASK_ALLOWED_ROOTS
+
+Env: ASK_ALLOWED_ROOTS — список через : (Unix) или ; (Windows).
+
+Default: $HOME + ASK_ROOT (если ASK_ROOT вне $HOME).
+
+Правила:
+
+    Каждый элемент — realpath.
+
+    newRoot должен быть внутри одного из allowedRoots (или равен ему).
+
+    Запрет на системные корни (/, /etc, /usr, /var, /bin, /sbin, /boot) — даже если в allowlist, 403 code: "system_path".
+
+    Запрет на $HOME целиком (можно только подпапки) — 403 code: "home_forbidden", если newRoot === $HOME. Причина: ~/.ssh, ~/.config/ask-code/*.key не должны быть доступны как root.
+
+    ASK_ALLOWED_ROOTS не может содержать / или $HOME (валидация при старте, exit(1)).
+
+Пример:
+bash
+
+ASK_ALLOWED_ROOTS="/home/user/projects:/home/user/work" node ask-code-server.mjs
+
+4.5. Пересчёт зависимых сущностей
+Сущность	При смене root
+ctx.root	newRoot
+ctx.memoryDir	memoryDir(SITE, newRoot) — новый каталог
+ctx.historyFile	historyFile(SITE, newRoot, sessionId) — новый файл
+ctx.state.history	[] (новая сессия)
+ctx.state.title	null
+ctx.browser	close() → null (lazy init при следующем /browser)
+ctx.apps	stopAll()
+ctx.watches	stopAll()
+ctx.allowedSites	clear() (сайты могли быть для другого проекта)
+ctx.state.model	сохраняется (модель не зависит от папки)
+
+Браузерный профиль per-root (опционально, приоритет P2): AskBrowser(newRoot, { dir: /var/ask/browsers/<hash(newRoot)> }) — чтобы логины/куки не смешивались между проектами. В 5А — просто close() (профиль общий, но закрывается).
+4.6. Python-инструменты workspace
+text
+
+ask_set_workspace(path: str)  → { root, changed }
+ask_get_workspace()           → { root, allowedRoots, sessionId }
+
+Поведение:
+
+    ask_set_workspace → POST /workspace → обновить локальный ROOT в Python (для относительных путей в других инструментах).
+
+    ask_get_workspace → GET /workspace.
+
+    При смене: Python также обновляет session_id (новый файл в новой папке), если автосессия включена.
+
+Ошибки: пробрасываются как McpError с текстом из Node.
+4.7. Относительные пути после смены workspace
+
+Требование: после ask_set_workspace все инструменты, принимающие path/folder, разрешают относительные пути от нового root.
+
+Проверка: ask_read_file("src/a.js") после смены на /home/user/projects/foo читает /home/user/projects/foo/src/a.js.
+
+Реализация: Python хранит ROOT в глобальной переменной, обновляет при ask_set_workspace; передаёт path в Node как есть (Node сам разрешает от ctx.root).
+5. Этап 5Б: Анализ файлов через ask
+5.1. Проблема и решение
+
+Проблема: сейчас Cline может прочитать файл через read_file (получить данные) и сам анализировать — но Cline работает на модели ask через прокси, и это двойной расход (Cline думает + ask думает). Или делегировать ask_execute(prompt) — но файл в промпт не попадёт.
+
+Решение: передавать файл в ask-сервер как files (пути), Node читает локально, отправляет в /v1/ask или /v1/code. Модель ask анализирует и возвращает ответ. Cline получает готовый результат.
+5.2. Адаптер формата files (Commit 52, блокер)
+
+Проблема: точный формат files в /v1/ask неизвестен. В /v1/code (из ask-code.mjs) — {kind: "image", name, mediaType, data}. Для текста, вероятно, {kind: "text", name, text}.
+
+Решение: адаптер с конфигом.
+
+Env:
+Переменная	Default	Описание
+ASK_FILES_FORMAT	auto	auto|code|text|image
+ASK_FILES_MAX	5	Макс. файлов в запросе
+ASK_FILES_MAX_BYTES	30000000	Общий размер (30 MB)
+
+Поведение auto:
+
+    При старте Node делает GET /v1/docs (или GET /v1/me) и ищет схему files.
+
+    Если не найдено — использует формат code (как в ask-code.mjs).
+
+    Логирует выбранный формат.
+
+Форматы:
+
+    code: {kind: "image"|"text", name, mediaType?, data?, text?} — как в /v1/code.
+
+    text: {name, text} (для /v1/ask, если он не принимает изображения).
+
+    image: {name, mediaType, data} (base64).
+
+Требование: адаптер покрыт юнит-тестами на все три формата.
+5.3. Node: files в POST /ask
+
+Тело:
+json
+
+{
+  "prompt": "проанализируй и дай краткое описание",
+  "files": ["hello.xlsx", "report.pdf"],
+  "useContext": true
+}
+
+Поведение:
+
+    Для каждого пути:
+
+        inside(root, path) → 403 code: "outside" если вне корня.
+
+        isSecret(basename(path)) → 403 code: "secret".
+
+        readOne(root, {path}) → {output, images, note}.
+
+    Классификация:
+
+        Текст (.py, .js, .md, .txt, …) → {kind: "text", name, text}.
+
+        Изображение (.png, .jpg, .heic, …) → {kind: "image", name, mediaType, data} (через pictureOf).
+
+        PDF → текст через readPdf + изображения страниц → {kind: "text", name, text} + опционально images.
+
+        Office (.xlsx, .docx, …) → текст через officeText → {kind: "text", name, text}.
+
+    Лимиты:
+
+        files.length > ASK_FILES_MAX → 413 code: "too_many_files".
+
+        Сумма data.length (base64) > ASK_FILES_MAX_BYTES → 413 code: "too_large".
+
+        Текст > 200 000 символов → обрезать с пометкой … (truncated).
+
+    Собрать files в формате адаптера.
+
+    Отправить в /v1/ask с system (если useContext).
+
+    SSE-проксирование как обычно.
+
+Ошибки:
+Код	code	Причина
+400	invalid_files	files не массив, пустые элементы
+403	outside	Вне корня
+403	secret	Секретный файл
+404	not_found	Файл не существует
+413	too_many_files	> 5
+413	too_large	> 30 MB
+5.4. Node: files в POST /execute
+
+Тело:
+json
+
+{
+  "prompt": "проанализируй hello.xlsx и создай report.xlsx с выводами",
+  "files": ["hello.xlsx"],
+  "mode": "all",
+  "session_id": "abc"
+}
+
+Поведение: как в /ask, но файлы передаются в /v1/code (в первом запросе). Модель может использовать read_excel/read_word повторно.
+5.5. Node: output_files в POST /execute
+
+Проблема: модель может создать файл (write_file, write_excel, write_word), но Cline не знает, какой. steps содержит wrote report.xlsx, но парсить строки — хрупко.
+
+Решение: отслеживать write-операции в doTool.
+
+Реализация:
+js
+
+// lib/executor.mjs
+ctx.writtenFiles = new Set();  // в makeCtx
+
+// в doTool, после успешного applyChange:
+if (name === 'write_file' || name === 'edit_file') {
+  ctx.writtenFiles.add(change.rel);
+}
+// для write_excel/write_word — аналогично (если это отдельные tools в ask-code)
+
+В ответе /execute (событие done):
+json
+
+event: done
+data: {
+  "answer": "...",
+  "steps": ["wrote report.xlsx"],
+  "output_files": ["report.xlsx"],
+  "usage": {...}
+}
+
+В GET /status/:id: поле outputFiles: ["report.xlsx"].
+
+Требование: output_files — только файлы, созданные/изменённые моделью (не прочитанные). Пути — относительные от root.
+5.6. Python: files в ask_ask и ask_execute
+
+Сигнатуры:
+python
+
+@mcp.tool()
+async def ask_ask(prompt: str, files: list[str] = None, use_context: bool = True) -> str:
+    """Ask with optional files (paths) and project context."""
+
+@mcp.tool()
+async def ask_execute(prompt: str, files: list[str] = None, mode: str = "all", ctx: Context = None) -> str:
+    """Autonomous task with optional files (paths). Returns answer + output_files."""
+
+Поведение: пробрасывают files в Node как есть; Node разрешает от ROOT.
+
+Возврат ask_execute:
+json
+
+{
+  "answer": "...",
+  "output_files": ["report.xlsx"]
+}
+
+(не просто answer, как раньше — расширение контракта, backward-compatible: если output_files пуст, поле можно опустить).
+5.7. Python: ask_analyze(path, prompt, mode)
+
+Сигнатура:
+python
+
+@mcp.tool()
+async def ask_analyze(path: str, prompt: str, mode: str = "read") -> str:
+    """Analyze a file via ask server. mode='read' — /ask (no tools, fast);
+    mode='write' — /execute (model may create output files)."""
+
+Поведение:
+
+    mode="read" → POST /ask {prompt, files: [path], useContext: true} → вернуть текст.
+
+    mode="write" → POST /execute {prompt, files: [path], mode: "all"} → вернуть {answer, output_files}.
+
+    Валидация mode: read|write, иначе McpError.
+
+Пример:
+text
+
+ask_analyze("hello.xlsx", "дай краткое описание содержимого", mode="read")
+→ "Файл содержит 3 листа: ..."
+
+ask_analyze("hello.py", "сделай ревью кода", mode="read")
+→ "Код в целом корректен, но ..."
+
+5.8. Python: обёртки
+python
+
+@mcp.tool()
+async def ask_review(path: str) -> str:
+    """Review code or document for bugs, risks, improvements."""
+    return await ask_analyze(path, REVIEW_PROMPT, mode="read")
+
+@mcp.tool()
+async def ask_summarize(path: str) -> str:
+    """Give a concise summary of a file's contents."""
+    return await ask_analyze(path, "Дай краткое описание содержимого этого файла.", mode="read")
+
+@mcp.tool()
+async def ask_explain(path: str) -> str:
+    """Explain what this code or document does."""
+    return await ask_analyze(path, "Объясни, что делает этот код/документ, для чего он.", mode="read")
+
+@mcp.tool()
+async def ask_plan(prompt: str) -> str:
+    """Make a plan for a task without doing it."""
+    return await ask_ask(f"Составь подробный план для задачи: {prompt}. Не выполняй, только план.", use_context=True)
+
+Промпты:
+
+    REVIEW_PROMPT — уже есть в ask-code.mjs (REVIEW_PROMPT), переиспользовать.
+
+    Для ask_summarize/ask_explain — короткие, на языке пользователя (по ASK_LANG).
+
+5.9. Обработка ошибок
+
+Все ошибки Node (400, 403, 404, 413) → McpError с текстом из {error}. Cline видит понятное сообщение.
+
+Особый случай: 413 too_large → сообщение «файл слишком большой (N MB, максимум 30 MB). Попробуйте разбить или использовать read_file + ask_ask с текстом».
+6. План коммитов
+Этап 5А (сессии + workspace)
+#	Сообщение	Что	Тест
+45	feat(mcp): auto-session (ASK_SESSION_ID, file, tools)	Автосессия + ask_session_new/resume/list/info	Перезапуск MCP → resume → история на месте; ASK_SESSION_ID переопределяет
+46	feat(server): GET /workspace, POST /workspace	Эндпоинты + валидация + пересчёт	POST /workspace меняет root; GET возвращает
+47	feat(server): ASK_ALLOWED_ROOTS, security checks	Allowlist, запрет системных путей и $HOME	POST /workspace /etc → 403; POST /workspace $HOME → 403; POST /workspace /allowed/sub → 200
+48	feat(server): workspace change — browser/apps/watches cleanup	close(), stopAll(), clear()	После смены: старый browser закрыт, apps остановлены
+49	feat(mcp): ask_set_workspace, ask_get_workspace	Python-инструменты + обновление ROOT	ask_set_workspace → ask_read_file("src/a.js") читает из нового корня
+50	test: workspace + session integration	Полный цикл: сессия → задача → смена workspace → новая сессия	pytest + npm test зелёные
+51	docs: workspace and sessions in README	Разделы про автосессию, workspace, allowlist	Следование docs → рабочая установка
+
+Оценка 5А: ~2.5 дня.
+Этап 5Б (файлы + обёртки)
+#	Сообщение	Что	Тест
+52	feat(server): files format adapter (auto/code/text/image)	Адаптер + discovery + env	Юнит-тесты на 3 формата; auto выбирает корректно
+53	feat(server): files in POST /ask	Чтение локально, классификация, лимиты, отправка	/ask с .xlsx → ответ; .env → 403; ../../etc/passwd → 403; 6 файлов → 413
+54	feat(server): files in POST /execute	То же для /execute	/execute с .xlsx → модель видит файл
+55	feat(server): output_files tracking in /execute	ctx.writtenFiles, output_files в done и /status	/execute «создай report.xlsx» → output_files: ["report.xlsx"]
+56	feat(mcp): files in ask_ask and ask_execute	Python пробрасывает files	ask_execute("анализ", files=["hello.xlsx"]) → ответ
+57	feat(mcp): ask_analyze tool	mode=read|write, валидация	ask_analyze("hello.py", "ревью") → текст; mode=write → {answer, output_files}
+58	feat(mcp): wrapper tools (ask_review, ask_summarize, ask_explain, ask_plan)	4 обёртки	Каждая возвращает осмысленный ответ
+59	test: files + analyze integration	Полный цикл: .xlsx, .pdf, .py; создание report.xlsx	pytest + npm test зелёные
+60	docs: files and analysis in README, MCP_TOOLS.md	Формат files, лимиты, примеры	Следование docs → рабочая установка
+
+Оценка 5Б: ~3.5 дня.
+Этап 5В (опционально)
+#	Сообщение	Что
+61	feat(mcp): ask_market (browser-backed analysis)	ask_execute(prompt, browser=true) с готовым промптом
+62	feat(mcp): ask_diff_review	git diff → ask_analyze
+63	feat(mcp): ask_test_plan	Анализ кода → план тестов
+
+Оценка 5В: ~1.5 дня (после 5Б).
+7. Критерии приёмки
+Этап 5А
+
+    При старте Python MCP создаётся session_id, сохраняется в ~/.config/ask-code/mcp-session.
+
+    Перезапуск MCP → ask_session_info показывает тот же session_id.
+
+    ask_execute без явного session_id использует автосессию → история растёт.
+
+    ask_session_new → новый session_id, старый в ask_session_list.
+
+    ask_session_resume(id) → переключение, история загружена.
+
+    GET /workspace → {root, allowedRoots, sessionId}.
+
+    POST /workspace /allowed/sub → 200, root изменён.
+
+    POST /workspace /etc → 403 code: "system_path".
+
+    POST /workspace $HOME → 403 code: "home_forbidden".
+
+    POST /workspace /outside → 403 code: "not_allowed".
+
+    POST /workspace при активной задаче → 409 code: "tasks_running".
+
+    После смены workspace: memoryDir новый, historyFile новый, browser закрыт, apps остановлены.
+
+    ask_set_workspace → ask_read_file("src/a.js") читает из нового корня.
+
+    ASK_ALLOWED_ROOTS с / → exit(1) при старте.
+
+    ASK_SESSION_AUTO=false → stateless (старое поведение).
+
+Этап 5Б
+
+    Адаптер files: auto выбирает формат, code/text/image — явно.
+
+    POST /ask с files: ["hello.xlsx"] → ответ модели с анализом.
+
+    POST /ask с files: [".env"] → 403 code: "secret".
+
+    POST /ask с files: ["../../etc/passwd"] → 403 code: "outside".
+
+    POST /ask с 6 файлами → 413 code: "too_many_files".
+
+    POST /ask с файлом > 30 MB → 413 code: "too_large".
+
+    POST /ask с .pdf → текст PDF передан, ответ содержит анализ.
+
+    POST /ask с .png → изображение передано (если формат image/code).
+
+    POST /execute с files → модель видит файл, может read_excel повторно.
+
+    POST /execute «создай report.xlsx» → output_files: ["report.xlsx"].
+
+    GET /status/:id → outputFiles: ["report.xlsx"].
+
+    ask_ask("анализ", files=["hello.xlsx"]) → ответ.
+
+    ask_execute("анализ", files=["hello.xlsx"]) → {answer, output_files}.
+
+    ask_analyze("hello.py", "ревью", mode="read") → текст ревью.
+
+    ask_analyze("hello.xlsx", "создай отчёт", mode="write") → {answer, output_files: ["report.xlsx"]}.
+
+    ask_analyze(..., mode="invalid") → McpError.
+
+    ask_review("hello.py") → ревью.
+
+    ask_summarize("hello.xlsx") → краткое описание.
+
+    ask_explain("hello.py") → объяснение.
+
+    ask_plan("добавить тесты") → план.
+
+Безопасность (сводно)
+
+    ASK_KEY не утекает в files, логи, ответы.
+
+    files не читают .env, ключи.
+
+    files не выходят за root.
+
+    Workspace не выходит за allowedRoots.
+
+    Workspace не меняется при активных задачах.
+
+Совместимость
+
+    Все 52 существующих инструмента работают без изменений.
+
+    ask_execute без files — как раньше.
+
+    ask_ask без files — как раньше.
+
+    Старые версии Python MCP — не ломаются (новые поля опциональны).
+
+8. Риски и митигация
+Риск	Вероятность	Влияние	Митигация
+Формат files в /v1/ask неизвестен	Высокая	Высокое	Адаптер + ASK_FILES_FORMAT; discovery через /v1/docs; fallback на code
+/v1/ask не принимает Office/PDF	Средняя	Среднее	Конвертировать в текст через officeText/readPdf; передавать как {kind: "text"}
+Модель не возвращает файл в /v1/ask	Высокая	Низкое	Для файла-результата — /execute (mode=write)
+Смена workspace ломает относительные пути в Python	Средняя	Высокое	Python хранит ROOT, обновляет при ask_set_workspace; тест
+ASK_ALLOWED_ROOTS пуст → нельзя сменить root	Средняя	Низкое	Default $HOME; документировать
+Браузерный профиль смешивается между проектами	Средняя	Среднее	В 5А — close() при смене; в 5В — per-root dir
+output_files не отслеживает Office-tools	Средняя	Среднее	Явно добавить в doTool для write_excel/write_word
+Cline не передаёт files (старая версия)	Низкая	Низкое	files опционален; без него — старое поведение
+Большие файлы (100 MB Excel)	Средняя	Среднее	Лимит 30 MB, 413; рекомендация разбить
+Секреты в имени файла (hello.env.txt)	Низкая	Среднее	isSecret(basename) ловит .env в конце; тест
+9. Definition of Done
+5А
+
+    □
+
+    Коммиты 45–51 смёржены.
+    □
+
+    npm test + pytest mcp/tests/ — зелёные.
+    □
+
+    Автосессия работает (перезапуск → resume).
+    □
+
+    ask_set_workspace работает, allowlist проверяется.
+    □
+
+    POST /workspace /etc → 403.
+    □
+
+    Смена workspace при активной задаче → 409.
+    □
+
+    README: разделы «Sessions», «Workspace», «ASK_ALLOWED_ROOTS».
+
+5Б
+
+    □
+
+    Коммиты 52–60 смёржены.
+    □
+
+    npm test + pytest mcp/tests/ — зелёные.
+    □
+
+    POST /ask с .xlsx, .pdf, .py — работают.
+    □
+
+    POST /ask с .env, ../../etc/passwd — 403.
+    □
+
+    POST /execute с files → output_files.
+    □
+
+    ask_analyze, ask_review, ask_summarize, ask_explain, ask_plan — работают.
+    □
+
+    README: раздел «Files and analysis», лимиты, примеры.
+    □
+
+    MCP_TOOLS.md обновлён (новые инструменты, files параметр).
+
+Общее
+
+    □
+
+    Все 52 старых инструмента работают.
+    □
+
+    ASK_KEY не утекает.
+    □
+
+    Нет console.log в Node.
+    □
+
+    Cline (вручную) вызывает ask_analyze("hello.xlsx", "описание") → ответ.
+
+10. Оценка
+Этап	Коммиты	Оценка
+5А (сессии + workspace)	45–51	2.5 дня
+5Б (файлы + обёртки)	52–60	3.5 дня
+5В (опционально)	61–63	1.5 дня
+Итого 5А+5Б	16 коммитов	~6 дней
+Буфер (адаптер files, Cline-специфика)		+1.5 дня
+Итого с буфером		~7.5 дней
+11. Открытые вопросы (закрыть до старта)
+
+    Формат files в /v1/ask — уточнить в https://ask.oryxml.com/v1/docs. Если недоступно — Commit 52 (адаптер) начнётся с ASK_FILES_FORMAT=code (как в ask-code.mjs).
+
+    /v1/ask и Office — если не принимает, Commit 53 конвертирует в текст. Проверить на .xlsx.
+
+    write_excel/write_word в doTool — есть ли они как отдельные tools в ask-code.mjs? Если да — добавить в ctx.writtenFiles. Если нет (Office пишется через write_file с base64?) — уточнить.
+
+    Cline и files — как Cline передаёт пути? Строкой или объектом? Проверить в текущей версии; если объектом — адаптировать сигнатуру Python.
+
+12. Ссылки
+
+    ask-code.mjs — readOne, officeText, readPdf, pictureOf, isSecret, inside
+
+    docs/api-stage2.md — текущий контракт /ask, /execute
+
+    MCP_TOOLS.md — 52 инструмента
+
+    ask API docs: https://ask.oryxml.com/v1/docs (формат files)
+
+    MCP spec: tools/call, Context (FastMCP)
+
+Если нужно — могу расписать детально любой коммит (точные сигнатуры, псевдокод, тестовые сценарии), или подготовить промпт для AI-агента на этап 5А/5Б (по образцу этапа 1).

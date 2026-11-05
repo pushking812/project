@@ -1,0 +1,296 @@
+# Реакция на review: что верно, что менять, что решать
+
+1. **Нумерация.** Файл назван «Этап 3», внутри написано «Этап 5» - предлагаю «этап 3»\
+2. коммиты с номера 45.  и с какого номера нумеровать коммиты - продолжаем текущую нумерацию в репо\
+3. **Формат `files` на сайте.** В этой сессии страницу `https://ask.oryxml.com/v1/docs` открыть не удалось... - приложил в docs/ask api docs.txt
+
+Review качественный — он поймал главное: **ТЗ писалось против оригинального `ask-code.mjs`, а не против фактической реализации**. Это меняет не цель, а способ. Ниже — ответы на все 8 вопросов, разрешение противоречий, план снятия блокеров и пересмотренный план коммитов.
+
+---
+
+## 1. Главный вывод: архитектура в ТЗ не та
+
+ТЗ предполагало `ctx.root`, `ctx.state.history`, `ctx.historyFile`, `ctx.watches` — как в монолите `ask-code.mjs`. Фактический сервер устроен иначе:
+
+| В ТЗ (монолит) | В реальности (сервер) | Следствие |
+|----------------|----------------------|-----------|
+| `ctx.root` per-request | `config.root` глобальный | Смена корня = `config.root = newRoot` + остановка общего |
+| `ctx.memoryDir`, `ctx.historyFile` | вычисляются от `config.root` при каждом запросе | Пересчёт не нужен |
+| `ctx.state.history` | сессии per-folder (`/sessions?folder=`) | `ctx.state.*` вообще нет |
+| `ctx.watches`, `ctx.browser` | глобальные `app.*` | Остановка через `app.apps`, `app.browser`, `app.watches` |
+
+**Это упрощает, а не усложняет.** Пункты 4.5 (пересчёт `memoryDir`/`historyFile`/`ctx.state`) из ТЗ можно вычеркнуть. Вместо них — тест: после смены корня `/memory`, `/sessions`, `/notes`, `/health` отвечают про новую папку.
+
+---
+
+## 2. Ответы на 8 вопросов
+
+| # | Вопрос | Решение |
+|---|--------|---------|
+| 2 | Имена инструментов | **Нативные** (`ask`, `execute`, `analyze`, `review`, `summarize`, `explain`, `plan`, `set_workspace`, `get_workspace`). Не дублировать `ask_ask` рядом с `ask` — клиент увидит два одинаковых. Если какое-то имя конфликтует со встроенным tool Cline (например, `review`) — префикс `ask_` только для конфликтующих. |
+| 3 | Автосессия при 409 | **Fallback на stateless** (запуск без сессии). Просто, не блокирует, не удивляет. Задокументировать: «при параллельных задачах в одной сессии вторая пойдёт stateless». |
+| 4 | Порог + авто-сжатие | **Да, оба.** Порог: 20 запросов **или** 50k токенов (`estimateTokens(history)`). При превышении — автоматический вызов `POST /compact` перед следующим запросом. Лог: `[INFO] [session] auto-compact at 20 requests`. Без этого автосессия «навсегда» раздует каждый запрос. |
+| 5 | `POST /workspace` в `plan` | **Запретить** (`403 code: "plan_mode"`). `plan` = «только смотрю, ничего не меняю» — смена корня это изменение. |
+| 6 | Файл автосессии на Windows | `%APPDATA%\ask-code\mcp-session.json` (fallback `~/.config/ask-code/`, если `%APPDATA%` не задан). Node: `process.env.APPDATA ?? path.join(os.homedir(), '.config', 'ask-code')`. Это кроссплатформенно и соответствует конвенции Windows. |
+| 8 | 3В (`ask_market`, `ask_diff_review`, `ask_test_plan`) | **Отложить.** `ask_market` требует browser + live data (сложно). `ask_diff_review` требует git в рабочей папке, а проект — не git-репозиторий (per review) — упадёт. `ask_test_plan` — тривиальная обёртка, добавить за 10 минут, когда понадобится. |
+
+Вопросы 1 и 7 в excerpt пустые — отвечать не на что.
+
+---
+
+## 3. Противоречия — как разрешить
+
+### 3.1. `$HOME` в allowlist
+
+- **Default:** разрешены любые подпапки `$HOME`; сам `$HOME` запрещён как корень → `403 home_forbidden`.
+- **`exit(1)` при старте** — только если `ASK_ALLOWED_ROOTS` **явно** задан и содержит `/`, корень диска или `$HOME`. Если переменная не задана — default безопасен, `exit(1)` не нужен.
+
+### 3.2. Порядок проверок в `POST /workspace`
+
+Строгий порядок (первое совпадение выигрывает):
+
+1. `400 invalid_path` — не строка, пустая, control chars.
+2. `403 system_path` — `/etc`, `/usr`, `/var`, `C:\Windows`, `C:\Program Files*`, `C:\ProgramData`, корень диска.
+3. `403 home_forbidden` — `$HOME` сам по себе.
+4. `403 not_allowed` — вне allowlist.
+5. `404 not_found` — не существует / не директория.
+6. `409 tasks_running` — есть активные задачи.
+7. `403 plan_mode` — режим `plan` (проверять **до** всех остальных, кроме `400`).
+
+`/etc` получит `system_path` (п. 2), а не `not_allowed` — это исправляет противоречие с критерием приёмки.
+
+### 3.3. Один `session_id` vs per-folder
+
+Хранить **словарь** `{root → session_id}` в файле автосессии:
+
+```json
+{
+  "sessions": {
+    "/home/user/project-a": "abc-123",
+    "/home/user/project-b": "def-456"
+  },
+  "default": "abc-123"
+}
+```
+
+При смене корня — брать сессию для нового корня; если нет — создать новую (или stateless, если `ASK_SESSION_AUTO=false`).
+
+### 3.4. 409 «уже текущая»
+
+Возвращать **`200 {ok: true, already_current: true, session_id}`** вместо 409. Для клиента это успех — он просто хотел убедиться, что сессия активна. 409 оставить только для реальных конфликтов (например, сессия занята другой задачей).
+
+---
+
+## 4. Риски — как адресовать
+
+### 4.1. Автосессия + параллельные задачи
+
+- **Primary:** при `409 lockSession` → retry **без сессии** (stateless). Пользователь получает результат, просто без истории. Лог: `[WARN] [session] locked, falling back to stateless`.
+- **Secondary:** `start_task` не использует автосессию вообще (только `execute`). Параллельные `start_task` — каждая своя stateless-задача.
+- **Document:** «параллельные задачи в одной сессии конфликтуют; для параллелизма используйте `start_task` (stateless) или явные разные `session_id`».
+
+### 4.2. Рост истории
+
+- Порог: `20` запросов **или** `50_000` токенов (по `estimateTokens`).
+- При превышении — авто-`/compact` перед следующим запросом.
+- Env: `ASK_SESSION_MAX_REQUESTS=20`, `ASK_SESSION_MAX_TOKENS=50000`, `ASK_SESSION_AUTO_COMPACT=true`.
+- Лог: `[INFO] [session] auto-compact (20 requests, 48k tokens)`.
+
+### 4.3. Смена корня во время `/ask`
+
+`tasks_running` смотрит только реестр задач (`/start`, `/execute`). Идущие потоки `/ask` и `/browser` в него не входят.
+
+**Решение:** добавить счётчик `activeRequests`:
+- `+1` при старте `/ask`, `-1` при завершении (в `finally`).
+- `+1`/`-1` для `/browser` (кроме `handoff`, где долго).
+- `POST /workspace` проверяет `activeRequests === 0` (объединить с `tasks_running` → `409 code: "requests_running"`).
+
+### 4.4. Смена корня + замки сессий
+
+Покрывается проверкой `tasks_running` (задача, которая держит замок, — активна). Добавить тест: start task → try workspace change → 409 → task done → workspace change → 200.
+
+### 4.5. Расширение прав
+
+- `POST /workspace` **запрещён в `plan`** (Q5).
+- Логировать каждую смену: `[INFO] [workspace] root changed: X → Y (by request)`.
+- Document: «любой, кто достучится до `127.0.0.1:8737`, может менять корень в пределах allowlist; API не аутентифицирован по дизайну».
+
+### 4.6. `files` и секреты
+
+`isSecret` по имени ловит `.env`, `id_rsa`, `*.key`, но не `config.json` с ключом внутри. Это **известное ограничение** — задокументировать:
+
+> «Файлы с именами, похожими на секреты (`.env`, ключи, сертификаты), блокируются. Файлы с секретами внутри, но безобидными именами (`config.json`) — **не блокируются**; используйте конвенцию `.env` или проверяйте вручную.»
+
+Опционально (этап 6): контентные эвристики (`"api_key":`, `"password":`, `-----BEGIN`, …) с предупреждением, а не блокировкой.
+
+### 4.7. `output_files`
+
+**Блокер.** Нужно выяснить, как модель создаёт `.xlsx` в `/execute`:
+
+- Если `write_excel`/`write_word` — отдельные tools в `doTool` → добавить в `ctx.writtenFiles`.
+- Если через `write_file` с бинарным содержимым → `write_file` уже отслеживается, ничего не делать.
+- Если никак (модель не может создать `.xlsx` в `/execute`) → `output_files` не будет работать для Office; документировать.
+
+Способ проверки — §5.3.
+
+---
+
+## 5. Блокеры — как проверить
+
+### 5.1. Функции ask-code
+
+```bash
+# Что реально экспортируется
+grep -nE "^(export )?(async )?function (readOne|officeText|readPdf|pictureOf|isSecret|inside|REVIEW_PROMPT)" build/ask-code-core.mjs
+
+# Или искать по всему build/
+grep -rnE "function (readOne|officeText|readPdf)" build/ lib/
+```
+
+Если не найдено — вероятно, они переименованы или инлайнуты в `lib/direct.mjs` (который, судя по review, отвечает за чтение файлов). Прочитать `lib/direct.mjs` — 5 минут.
+
+### 5.2. Как Cline передаёт `files`
+
+Два способа:
+- **Документация Cline** — раздел про MCP tools, параметры-массивы.
+- **Практический тест:** запустить `npx @modelcontextprotocol/inspector python mcp/server.py`, вызвать `ask` с `files: ["a.txt"]`, посмотреть, что приходит в Python (строка или объект).
+
+Если объект — адаптировать сигнатуру Python (`files: list[dict]`). Если строка — текущее ТЗ верно.
+
+### 5.3. `output_files` в `doTool`
+
+```bash
+# Есть ли write_excel/write_word в executor?
+grep -nE "write_excel|write_word|edit_word" lib/executor.mjs mcp/ask_mcp/tools/office.py vendor/ASK.md
+```
+
+Три возможных исхода:
+- **Найдено в `doTool`** → добавить в `ctx.writtenFiles`, всё работает.
+- **Найдено только в Python `office.py`** → модель в `/execute` не может создавать Office-файлы; `output_files` только для `write_file`.
+- **Не найдено нигде** → задокументировать ограничение.
+
+### 5.4. Где живут `browser` и `watches`
+
+```bash
+grep -nE "app\.browser|app\.watches|new AskBrowser|new Watches" lib/*.mjs ask-code-server.mjs
+```
+
+Нужно для commit 5 (остановка при смене корня). 10 минут чтения.
+
+---
+
+## 6. Пересмотренный план коммитов
+
+### 3А — Сессии + workspace (10 коммитов)
+
+| # | Commit | Ключевое |
+|---|--------|----------|
+| 1 | `chore: lib/workspace.mjs — path validation (Windows + Unix)` | Порядок проверок из §3.2, системные пути для обеих ОС |
+| 2 | `feat: GET/POST /workspace` | `config.root = newRoot` + остановка `app.apps`/`app.browser`/`app.watches` |
+| 3 | `feat: block /workspace in plan mode` | `403 plan_mode` (проверять первым после `400`) |
+| 4 | `feat: activeRequests counter for /ask and /browser` | Для блокировки смены корня во время стримов |
+| 5 | `test: workspace change stops apps/browser/watches` | Интеграционный |
+| 6 | `feat(mcp): set_workspace, get_workspace` | Нативные имена |
+| 7 | `feat(mcp): auto-session with per-root dictionary` | `ASK_SESSION_ID`, `ASK_SESSION_FILE`, fallback на 409 |
+| 8 | `feat(mcp): session threshold + auto-compact` | 20 запросов / 50k токенов |
+| 9 | `test: sessions + workspace integration` | Полный цикл |
+| 10 | `docs: workspace, sessions, Windows notes` | README, `docs/api-stage3.md`, `MCP_TOOLS.md` |
+
+### 3Б — Файлы + обёртки (10 коммитов)
+
+| # | Commit | Ключевое |
+|---|--------|----------|
+| 11 | **BLOCKER: verify ask-code functions** | `grep` по `build/`, чтение `lib/direct.mjs` |
+| 12 | **BLOCKER: verify output_files mechanism** | `grep` по `executor.mjs`/`office.py` |
+| 13 | `feat: files format adapter` | `ASK_FILES_FORMAT=auto/code/text/image` (формат уже известен — `{kind, name, text|data}`) |
+| 14 | `feat: files in POST /ask` | Валидация, классификация, лимиты 413, `isSecret` |
+| 15 | `feat: files in POST /execute` | То же + `writtenFiles` |
+| 16 | `feat: output_files in done and /status` | `outputFiles` рядом с `text`/`tools`/`usage`/`session` (не менять существующие имена) |
+| 17 | `feat(mcp): files in ask and execute` | Проброс |
+| 18 | `feat(mcp): analyze, review, summarize, explain, plan` | Нативные имена |
+| 19 | `test: files + analyze integration` | `.xlsx`, `.pdf`, `.py` |
+| 20 | `docs: files, analysis, limits` | README, `MCP_TOOLS.md`, `postman/curls.txt` |
+
+**Порядок:** 3А (1–10) → блокеры (11–12) → 3Б (13–20). 3В отложен.
+
+**Оценка:** 3А — 2.5 дня, 3Б — 3 дня, блокеры — 0.5 дня. Итого **~6 дней**.
+
+---
+
+## 7. Что осталось нерешённым
+
+- **Где живут `app.browser` и `app.watches`** — чтение `lib/browser.mjs`/`lib/watches.mjs` перед commit 5 (10 минут).
+- **Точный список системных путей Windows** — перечислить в commit 1 (`C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`, корень диска, `\\?\` UNC).
+- **Формат `files`** — уже известен из документации (`{kind, name, text|data}`), adapter упрощается до «прочитать локально → классифицировать → отдать как есть».
+
+Всё остальное — в §2–§5.
+
+---
+
+## 8. Что делать прямо сейчас
+
+1. **Проверить 3 блокера** (§5) — 30 минут, снимает неопределённость с 3Б.
+2. **Прочитать `lib/config.mjs`, `lib/direct.mjs`, `lib/browser.mjs`, `lib/watches.mjs`** — 30 минут, уточняет commit 5.
+3. **Утвердить ответы на 8 вопросов** (§2) — если согласны, ТЗ-дельта готова.
+4. **Начать commit 1** (workspace module) — после этого 3А идёт без остановок.
+
+Если хотите — могу сразу выпустить **дельту ТЗ** (только изменённые разделы 4.3, 4.5, 5.x, 7, 11 — с учётом этого review), либо расписать commit 1–2 детально (с сигнатурами, тестами, Windows-спецификой). Скажите, с чего начать.
+
+Дополнительно тесты
+
+4. 
+PS C:\Users\user\Desktop\code-ask-api\project> grep -nE "^(export )?(async )?function (readOne|officeText|readPdf|pictureOf|isSecret|inside|REVIEW_PROMPT)" build/ask-code-core.mjs
+463:export async function inside(root, path, { mustExist = true } = {}) {
+568:export async function pictureOf(full, rel, magic, size, via = process.platform === 'darwin' ? 'sips' : 'magick') {
+625:export async function readPdf(full, rel, from = 1, count = PDF_PAGES, via = process.platform === 'darwin' ? 'pdfkit' : 'poppler') {
+853:export function officeText(name, zip) {
+942:async function readOne(root, input) {
+
+5.
+curl --location 'http://127.0.0.1:8737/ask' \
+--header 'content-type: application/json' \
+--data '{
+    "prompt": "что в этом файле?",
+    "files": [
+        "sec.log"
+    ],
+    "useContext": false
+}'
+
+Response:
+
+event: delta
+data: {"text":"Вы не указали,"}
+
+event: delta
+data: {"text":" какой имен"}
+
+...
+
+event: done
+data: {}
+
+6.
+PS C:\Users\user\Desktop\code-ask-api\project> Select-String -Path .\ask-code-server.mjs, .\lib\*.mjs -Pattern "files" | Select-Object -First 10
+
+ask-code-server.mjs:13:import { addFileRoutes } from './lib/files.mjs';
+lib\direct.mjs:44:  [/Memory files are Markdown/, 400, 'not_markdown'],
+lib\files.mjs:1:// Stage 2A: files and commands, done directly (no model): /read /list /search /write /edit /command.
+lib\files.mjs:33:    await readTool(res, 'list_files', { path: optString(body, 'path') ?? '', depth: optInt(body, 'dept
+h') });
+lib\files.mjs:57:    allowWrite(modeOf(body, config), 'changing files');
+lib\files.mjs:62:    log('info', 'files', `${name} ${planned.rel}`);
+lib\files.mjs:86:    log('info', 'files', `command ${brief(command, 80)}`);
+lib\memory.mjs:22:/** The .md files in the memory folder (MEMORY.md, the index, is not a topic). */
+lib\sessions.mjs:2:// Files are those of ask-code (historyFile / loadHistory / saveHistory): the folder's own file is t
+he session named
+lib\sessions.mjs:4:// id never changes (ask-code's /resume renames files, which would change ids).
+
+7. 
+// test/live.mjs
+test('ask with files returns file content', async () => {
+  const r = await post('/ask', { prompt: 'что в этом файле?', files: ['fixtures/hello.txt'], useContext: false });
+  const answer = collectDeltas(r);
+  assert.match(answer, /hello/i);           // модель процитировала
+  assert.doesNotMatch(answer, /не указал/i); // не «забыла»
+});

@@ -1,0 +1,809 @@
+# Ask API
+
+One HTTP API serves the app and your own code. You send a question; the answer streams back as it
+is written. The server handles everything around the model for you: queueing, retries of temporary
+failures, the model provider's usage limits, your plan's limits, and clear errors with a time to
+try again.
+
+- Base URL: `https://ask.oryxml.com` (all paths below start with `/v1`). This page is always at `/v1/docs` on the site.
+- Requests: JSON. Answers: [Server-Sent Events](https://html.spec.whatwg.org/multipage/server-sent-events.html) (`text/event-stream`).
+- Errors: JSON, `{"error": {"type", "code", "message"}}`, with an HTTP status.
+
+## Contents
+
+1. [Quick start](#quick-start)
+2. [Authentication](#authentication)
+3. [Ask a question](#ask-a-question-post-v1ask)
+4. [Conversations: history, roles and your own instructions](#conversations-history-roles-and-your-own-instructions)
+5. [The answer stream](#the-answer-stream) (every stream ends with `done` or `error`; [picking up a dropped one](#if-the-connection-drops))
+6. [Chats](#chats)
+7. [Files and pictures](#files-and-pictures) ([in a long conversation](#files-in-a-long-conversation))
+8. [Code: Ask in your folder](#code-ask-in-your-folder)
+9. [Models](#models)
+10. [Limits and usage](#limits-and-usage)
+11. [Errors](#errors)
+12. [Retries: what the server does, what you should do](#retries)
+13. [Account and keys](#account-and-keys)
+14. [Admin API](#admin-api-owner-only)
+15. [Privacy](#privacy)
+16. [All endpoints](#all-endpoints)
+
+## Quick start
+
+1. Open the app, sign in, go to **Account → API keys → Make a key**. Copy the key (`sk-ask-…`); it's
+   shown once.
+2. Ask:
+
+```bash
+curl -N https://ask.oryxml.com/v1/ask \
+  -H "Authorization: Bearer $ASK_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Explain DNS in two sentences", "model": "claude-sonnet-5-5"}'
+```
+
+You get a stream like this (`-N` turns off curl's buffering so you see it live):
+
+```
+id: 1
+event: status
+data: {"state":"starting"}
+
+id: 2
+event: status
+data: {"state":"thinking"}
+
+id: 3
+event: status
+data: {"state":"writing"}
+
+id: 4
+event: delta
+data: {"text":"DNS turns names like example.com"}
+
+id: 5
+event: delta
+data: {"text":" into the IP addresses computers use…"}
+
+id: 6
+event: usage
+data: {"input":630,"output":41,"costUsd":0.0023}
+
+id: 7
+event: limits
+data: {"plan":"free","kind":"asks","used":3,"limit":20,"resetsAt":"2026-10-18T00:00:00.000Z"}
+
+id: 8
+event: done
+data: {"messageId":"8b1c…","durationMs":2140}
+```
+
+### JavaScript (browser or Node 18+)
+
+```js
+async function ask(prompt, { model = 'claude-sonnet-5-5', onText } = {}) {
+  const res = await fetch('https://ask.oryxml.com/v1/ask', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.ASK_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, model }),
+  });
+  if (!res.ok) {
+    const { error } = await res.json(); // e.g. 429 quota_exceeded, with a Retry-After header
+    throw Object.assign(new Error(error.message), { status: res.status, code: error.code, retryAfter: res.headers.get('retry-after') });
+  }
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '', text = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += value;
+    let end;
+    while ((end = buffer.indexOf('\n\n')) >= 0) {
+      const frame = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      const event = frame.match(/^event: (.*)$/m)?.[1];
+      const data = frame.match(/^data: (.*)$/m)?.[1];
+      if (!event || !data) continue; // heartbeats are ": hb" comments
+      const payload = JSON.parse(data);
+      if (event === 'delta') { text += payload.text; onText?.(payload.text); }
+      if (event === 'error') throw Object.assign(new Error(payload.message), payload);
+      if (event === 'done') return { text, ...payload };
+    }
+  }
+  throw new Error('The connection dropped before the answer finished');
+}
+```
+
+### Python
+
+```python
+import json, os, requests
+
+def ask(prompt, model="claude-sonnet-5-5"):
+    r = requests.post(
+        "https://ask.oryxml.com/v1/ask",
+        headers={"Authorization": f"Bearer {os.environ['ASK_KEY']}"},
+        json={"prompt": prompt, "model": model},
+        stream=True,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(r.json()["error"], r.headers.get("Retry-After"))
+    event, text = None, ""
+    for line in r.iter_lines(decode_unicode=True):
+        if line.startswith("event: "):
+            event = line[7:]
+        elif line.startswith("data: "):
+            data = json.loads(line[6:])
+            if event == "delta":
+                text += data["text"]
+                print(data["text"], end="", flush=True)
+            elif event == "error":
+                raise RuntimeError(data)  # data["retryAt"] says when to try again, if known
+            elif event == "done":
+                return text
+```
+
+## Authentication
+
+Every request except `/v1/config`, `/v1/plans` and the sign-in steps needs
+`Authorization: Bearer <token>`. Two kinds of token:
+
+| Token | Looks like | For | Lifetime |
+| --- | --- | --- | --- |
+| **API key** | `sk-ask-…` | your scripts and servers | until you delete it |
+| **Access token** | a JWT | the app in a browser | 15 minutes, renewed with the refresh cookie |
+
+**API keys** belong to an account and act as it: same plan, models, limits, chats. A key can ask,
+chat and read usage. It **can't** manage access: making keys, passkeys, backup codes, changing plan,
+deleting the account and the admin API need a signed-in browser session (`403 session_required`). So
+a leaked key can be deleted, and it never becomes the whole account. Only a key's hash is stored.
+
+**Browser sessions.** The app signs in with passkeys (no passwords, no email):
+`POST /v1/auth/passkey/login/options` → the browser's WebAuthn prompt → `POST /v1/auth/passkey/login/verify`
+returns `{accessToken, me}` and sets an httpOnly refresh cookie (scoped to `/v1/auth`). The app
+calls `POST /v1/auth/refresh` when the access token runs out; the refresh token rotates every time,
+and reusing an old one ends the session (`409 refresh_race` within 30 seconds means "two tabs at
+once, retry"). `POST /v1/auth/logout` ends it. Signing out takes effect at once on every request.
+
+**Guests.** `POST /v1/auth/guest` starts an anonymous session for one-off questions (`/v1/ask`).
+Guests can't chat, make keys or pick a plan; saving a passkey turns the guest into an account and
+keeps its usage.
+
+**No guest trial.** ask.oryxml.com runs without one (`SIGNUPS=closed`): `POST /v1/auth/guest`
+answers `403 signups_closed`. People sign up with a passkey, optionally sending their name to
+`POST /v1/auth/passkey/register/options` as `{"name": "Anna"}`. The new account is `"status": "active"`
+at once: nobody approves it. New accounts per network are limited (5 an hour).
+`GET /v1/config` says which mode is on (`private: true` = the sign-up form, no trial):
+
+```json
+{ "private": true, "appName": "Ask", "guests": false, "checkout": "off", "prices": { "plus": 20, "pro": 100, "max": 200 } }
+```
+
+`checkout` is `off` (plans switch for free, the beta) or `test` (a checkout in dollars that takes
+no money, see [Account and keys](#account-and-keys)).
+
+## Ask a question: `POST /v1/ask`
+
+A question and its streamed answer; with `history`, the next turn of a conversation you keep. Nothing but a
+usage record is kept (no question, no answer). Works for guests, accounts and API keys.
+
+```json
+{ "prompt": "How do magnets work?", "model": "claude-sonnet-5-5" }
+```
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `prompt` | string, 1–100 000 chars | required: the newest message |
+| `model` | string | one of [Models](#models); default `claude-sonnet-5-5` |
+| `system` | string, up to 20 000 chars | optional: your own instructions (rules, persona, format), ahead of anything in the messages. See [Conversations](#conversations-history-roles-and-your-own-instructions) |
+| `history` | array of `{"role": "user" \| "assistant", "text", "files"?}`, up to 400 | optional: the conversation so far, oldest first, without the newest message. `files`: what that message had attached, see [Files in a long conversation](#files-in-a-long-conversation) |
+| `tier` | `"Fast"` \| `"Balanced"` \| `"Best"` | older clients only: Haiku / Sonnet / Opus |
+| `files` | array, up to 5 | optional: pictures and text files, see [Files and pictures](#files-and-pictures) |
+
+Before anything runs, the server checks the model is in your plan (`403 model_not_in_plan`) and that
+your limit isn't used up (`429 quota_exceeded`, with `Retry-After`). Those come back as JSON errors,
+not as a stream.
+
+**Answers at once.** Your plan's limit is what stops an account; how many questions you send in parallel isn't.
+One account (all its API keys and devices together) runs up to 2 answers at once on Free, 5 on Plus, 10 on Pro and
+20 on Max. A question past that waits for one to finish (up to 2 minutes, then `429 too_many_requests`) instead of
+failing, so a server asking for many people at once just sees some answers start a little later. Free accounts
+and guests can also send at most 60 questions a minute from one IP address (`429 too_many_requests`, with
+`Retry-After`); paid accounts aren't counted per IP.
+
+**Headers.** Send `Idempotency-Key: <your id for this request>` (up to 200 printable characters, unique per
+question) to make retries safe: the same key again within a day never starts a second answer. While the first
+is still going (or for 5 minutes after), you get its stream from the start; later, `409 already_answered`
+with the run in the message ([`GET /v1/runs/{runId}`](#if-the-connection-drops) says how it ended). The
+answer's response carries `X-Run-Id`: the run's id, before any event arrives.
+
+## Conversations: history, roles and your own instructions
+
+Three things go to the model separately: **your instructions** (`system`), **the conversation so far** (each
+message with its role) and **the newest message**. Don't put role labels or rules inside `prompt`: the model
+then reads them as something the person wrote, and they don't take priority.
+
+**Your instructions: `system`.** On `POST /v1/ask` and `POST /v1/conversations/{id}/messages` (Code takes
+the folder's `notes` instead). They go into
+the system prompt, after the service's own rules: the model follows them in every answer, ahead of anything
+the messages say (a message saying "ignore your rules" doesn't undo them). Send them with every request:
+nothing is remembered between requests.
+
+```json
+{ "system": "You are the support assistant of Acme Bikes. Answer in Russian, in three sentences at most.",
+  "history": [
+    { "role": "user", "text": "Do you ship to Kazan?" },
+    { "role": "assistant", "text": "Yes, in 3–5 days." }
+  ],
+  "prompt": "And how much is it?" }
+```
+
+**Two ways to keep a conversation:**
+
+| | You keep it: `POST /v1/ask` with `history` | We keep it: [Chats](#chats) |
+| --- | --- | --- |
+| Who stores the messages | your program (nothing is stored here) | the server, encrypted per account |
+| Each request sends | the whole conversation so far | only the newest message |
+| Guests | yes | no: accounts and API keys |
+| Long conversations | folded into notes for you (below) | folded into notes on the server |
+
+**Long conversations are folded, never cut.** When a conversation grows past what fits (about 48 000
+characters), its oldest messages are summarised into notes before the answer, so the model keeps their
+point. With `history`, you're told in the stream (`folded`, before any text):
+
+```
+event: folded
+data: {"summary": "Notes: Acme Bikes support. The customer asked about shipping to Kazan…", "count": 6}
+```
+
+From then on, send the notes in place of the first `count` messages of the `history` you sent, as this pair,
+word for word, then the messages after them:
+
+```json
+[ { "role": "user", "text": "[Earlier in this conversation, folded into notes]" },
+  { "role": "assistant", "text": "<summary>" },
+  …the messages after the first `count`… ]
+```
+
+If you don't, nothing breaks: the server folds again next time (a few seconds slower, and a little usage).
+Files of the folded messages go with the pair's first message (`files` on the FOLDED_MARK message), so the model
+still has them: see [Files in a long conversation](#files-in-a-long-conversation).
+How the model gets it: a model call takes one system prompt and one request, so the conversation goes in
+the request with each message marked by its role (`<user>…</user>`, `<assistant>…</assistant>`, notes in
+`<notes_on_earlier_messages>`), and your `system` in the system prompt.
+
+## The answer stream
+
+Events, in order (each has an increasing `id`):
+
+| Event | Data | When |
+| --- | --- | --- |
+| `status` | `{"state": "starting", "runId"}` | at once; `runId` is what Stop needs |
+| `status` | `{"state": "queued", "position": 2}` | all answer slots are busy; repeats as you move up |
+| `status` | `{"state": "reading", "site", "count"}` | in the app only: opening the links in the question (below) |
+| `pages` | `{"files": [...]}` | in the app only: the pages of those links, as files of the question |
+| `web` | `{"tool": "web_search", "query", "results"?}` or `{"tool": "web_fetch", "url"}` | in the app and in Code tasks: Ask is searching the web or reading a page (a search comes again with `results` when it ends); the text goes on after it |
+| `status` | `{"state": "thinking"}` | the model has the question |
+| `status` | `{"state": "writing"}` | before the first text |
+| `folded` | `{"summary", "count"}` | a long conversation was folded into notes: see [Conversations](#conversations-history-roles-and-your-own-instructions) |
+| `delta` | `{"text": "…"}` | many; append them in order |
+| `usage` | `{"input", "output", "costUsd"}` | tokens (input includes cached) and the provider cost |
+| `limits` | your [limits](#limits-and-usage) after this answer | always, also after an error |
+| `done` | `{"messageId", "durationMs", "truncated"?}` | success. `truncated: true` = the answer hit the length limit; ask "continue" for the rest |
+| `error` | `{"code", "message", "retryable", "retryAt"?}` | instead of `done`; see [Errors](#errors) |
+
+**Links in a question.** In the Ask app, links in the person's message are opened on the server first (public
+sites only, following each site's robots.txt, as `AskBot`; up to 3 per message) and each page goes to the model as
+a file of that message. In the app Ask can also search the web and read
+pages itself, when the answer needs it, and gives its sources as links. Requests made with an API key are left
+exactly as sent: no link is opened and nothing is searched. To have Ask read a page there, send its text as a file.
+
+**The last event is `done` or `error`.** Whatever happens to the answer (finished, failed, stopped, or the
+server restarting for an update), the stream says so before it closes. If your connection closes without
+either, the connection dropped on the way (or, rarely, the server went down hard): [pick it up](#if-the-connection-drops),
+or ask `GET /v1/runs/{runId}` how it ended. Don't send the question again without an `Idempotency-Key`: that
+starts a second answer and is counted twice.
+
+A `: hb` comment arrives every 15 seconds to keep proxies from closing the connection; ignore it.
+To stop an answer, `POST /v1/runs/{runId}/stop` (`204`; `404` when it's already over or not yours). The
+stream then ends with `error` `stopped`. Closing the connection alone also stops it, but only after 2
+minutes (the server waits for you to come back) and proxies can take a while to pass it on; the answer keeps
+counting until then. You're charged only for what was written.
+
+### If the connection drops
+
+Keep the `runId` (the `X-Run-Id` header, or the first `status` event) and the `id` of the last event you got. Then:
+
+```
+GET /v1/runs/{runId}/events
+Last-Event-ID: 17            (or ?after=17)
+```
+
+You get every event after that one, then the rest live, ending with `done` or `error` as usual. This works
+while the answer is going (it waits for you for 2 minutes after a drop, then stops with `disconnected`) and
+for 5 minutes after it ended (sooner on a very busy server: finished answers' events share one memory budget,
+oldest first). Same account or key only. `404`: its events are gone (after those 5 minutes, a busy server
+needed the room, or the server restarted); `GET /v1/runs/{runId}` still says how it ended, and a chat's answer is
+in the chat. `410 replay_gone`: you dropped too long ago in a very long answer (the server keeps its newest ~2 MB
+of events). A connection that stops reading falls behind and is closed by the server: pick it up the same way.
+Code tasks (`/v1/code`) can't be picked up: they stop with their connection.
+
+**How did it end?** `GET /v1/runs/{runId}` answers for a day, for the run's own account:
+
+```json
+{ "runId": "…", "kind": "ask", "status": "ok", "endedBy": "done", "messageId": "…",
+  "startedAt": "…", "endedAt": "…", "replayable": false }
+```
+
+`status`: `running`, `ok`, `stopped` or `error` (with `errorCode`); `endedBy`: `done`, `error`, `user` (Stop),
+`gone` (nobody came back for 2 minutes) or `shutdown`. The text isn't kept here: a chat's answer is in the
+chat (`messageId`); a `/v1/ask` answer only while `replayable` is true.
+
+```js
+let runId, lastId = 0;
+async function read(res) {               // parse SSE: for each event, remember its id
+  for await (const ev of events(res)) {
+    if (ev.id) lastId = ev.id;
+    if (ev.event === 'status' && ev.data.runId) runId = ev.data.runId;
+    if (ev.event === 'done' || ev.event === 'error') return ev;
+    handle(ev);
+  }
+  return null;                           // closed without done/error: dropped
+}
+const first = await fetch(`${base}/v1/ask`, { method: 'POST', headers: { ...headers, 'Idempotency-Key': crypto.randomUUID() }, body });
+runId = first.headers.get('x-run-id');
+let end = await read(first);
+for (let tries = 0; !end && runId && tries < 5; tries++) {
+  await new Promise((r) => setTimeout(r, 1000 * 2 ** tries));
+  const res = await fetch(`${base}/v1/runs/${runId}/events`, { headers: { ...headers, 'Last-Event-ID': String(lastId) } });
+  if (res.status === 404 || res.status === 410) break;   // gone: ask again
+  end = await read(res);
+}
+```
+
+The text is Markdown (GitHub-flavoured, plus math in `$…$` / `$$…$$` and Mermaid code blocks).
+
+## Chats
+
+Conversations that remember. **Accounts only** (every plan, Free included); guests get
+`403 account_required`. Titles and messages are stored encrypted with a key per account.
+
+| Request | Does |
+| --- | --- |
+| `POST /v1/conversations` | new chat → `{id, title, updatedAt}` |
+| `GET /v1/conversations` | your chats, newest first: `[{id, title, updatedAt}]`, up to 200. Pages: `?limit=` (1–200) and `?before=` the `x-next-cursor` header of the page before (no header: that was the last page) |
+| `GET /v1/conversations/{id}` | the whole chat: `{id, title, messages: [{id, role, text, createdAt, partial?, files?}], hasMore, before, summary}`. `?limit=50` gives only the newest 50 (paging below) |
+| `GET /v1/conversations/{id}?before={messageId}&limit=50` | the page before that message (`limit` 1–1000; with `before`, default 50) |
+| `GET /v1/conversations/{id}/files/{fileId}` | a file the chat keeps, as it was sent (a picture's bytes with its type, a PDF, or a text file's text) |
+| `POST /v1/conversations/{id}/messages` | `{"text": "…", "model"?: "…", "files"?: […], "system"?: "…"}` → the same [stream](#the-answer-stream) as `/v1/ask`. **Edit / Retry:** add `"replace": "<one of your message ids>"` (and `"keepFiles": true` to send its files again): the chat before that message goes to the model, and once the new answer is in, that message and everything after it are replaced. A failed answer changes nothing |
+| `PATCH /v1/conversations/{id}` | `{"instructions": "…"}`: the chat's own instructions (up to 20 000 characters; empty removes them). Every answer in the chat follows them, ahead of the messages; a message's own `system` is added after them |
+| `DELETE /v1/conversations/{id}` | deletes the chat, its messages and its files |
+| `GET /v1/search?q=…` | where something was said in your chats: `{hits: [{conversationId, title, messageId, role, snippet, createdAt}], complete}`, newest first (up to 30, 3 per chat). Chats are encrypted, so each search reads the newest 5 000 messages; `complete: false` means older ones weren't looked at |
+
+Each turn sends the whole chat along: the messages word for word, and once it's long, its oldest part as
+notes (folded automatically on the server after an answer; nothing is ever just dropped). Add `system` to a
+message for your own instructions ([Conversations](#conversations-history-roles-and-your-own-instructions)).
+A turn is stored only when an answer came back, so a failed turn can simply be sent again. Another
+account's chat is always `404`.
+
+**Long chats open page by page.** `GET /v1/conversations/{id}` answers with the newest 50 messages, oldest first
+within the page (the same fields as always). `hasMore: true` means older ones exist: ask for them with
+`?before=<before>` (`before` is the oldest message's `id` on this page), until `hasMore` is `false` (`before` is
+then `null`). `limit` changes the page size, up to 1000. A `before` that isn't a message of this chat is
+`400 bad_cursor`.
+
+**Where it was summarised.** Once a chat is long, its earlier messages are folded into notes (the model reads them
+in place of those messages; every message stays in the chat). `summary` says where and what:
+
+```json
+"summary": { "throughId": "<the last message folded in>", "notes": "Notes: Acme Bikes support…", "at": "…" }
+```
+
+It's `null` until the chat is first folded; folding happens just after an answer, so it can appear a few seconds
+after one. The notes are decrypted for the chat's own account only.
+
+**Files stay with the chat.** Files sent in a chat are kept with it, encrypted with the account's key like the
+messages, and every later message carries them to the model again (within the limits in
+[Files in a long conversation](#files-in-a-long-conversation)). A user message's `files` lists them:
+`{kind, name, size, id?}` (`size`: characters of a text file, base64 characters of a picture or PDF). With `id`,
+the chat still keeps the file (`GET …/files/{id}`); without it, only its name is left.
+
+## Files and pictures
+
+`POST /v1/ask`, `POST /v1/conversations/{id}/messages` and `POST /v1/code` take up to 5 files:
+
+```json
+{
+  "prompt": "What's wrong here?",
+  "files": [
+    { "kind": "image", "name": "screen.png", "mediaType": "image/png", "data": "<base64>" },
+    { "kind": "text", "name": "add.js", "text": "export const add = (a, b) => a - b;" }
+  ]
+}
+```
+
+- Pictures: `image/jpeg`, `image/png`, `image/webp` or `image/gif`, base64 up to 5 000 000 characters.
+  The model sees them best at 1568 px on the longest side (the app shrinks photos to that).
+- Text files: up to 200 000 characters each. They reach the model as `<file name="…">` blocks
+  before your question.
+- PDFs: base64 up to 10 000 000 characters (about 7.5 MB); the model reads the text and sees up to 100 pages.
+- The whole request may be up to 30 MB on these routes (1 MB elsewhere).
+- `/v1/ask` without `history` keeps nothing. A chat keeps its files (encrypted) so later messages can still use
+  them; a conversation you keep sends them back with `history` (below).
+
+### Files in a long conversation
+
+A file attached early stays readable for the whole conversation: ask about the spec from message 1
+at message 20 and the model still has it. Every message carries the earlier files again, the newest first:
+
+| What | Goes again with every later message |
+| --- | --- |
+| Text files (and Office text) | in a `<file>` block inside their message's turn (or after the notes, for messages folded into them): up to 100 000 characters of them, newest first; the one that doesn't fit whole is cut in the middle |
+| Pictures | the newest 5 (6 000 000 base64 characters in all), numbered where they were sent: `[picture 2: plan.png]` |
+| PDFs | the newest 3 (9 000 000 base64 characters in all): `[PDF 1: offer.pdf]` |
+| Anything older | by name, `[attached: name, not sent again]`: the model knows it existed and can ask for it again |
+
+Earlier pictures and PDFs give way to the newest message's own (at most 24 000 000 base64 characters of them in one
+request). They count towards your [limits](#limits-and-usage) each time they go, like any picture.
+
+- **Chats** keep the contents of their newest 50 files, up to about 30 MB in all; older files keep their name.
+  Deleting the chat (or the account) deletes them.
+- **`/v1/ask` with `history`**: send each message's files with it, the way you sent them
+  (`{"kind", "name", "text"}` or `{"kind", "name", "mediaType"?, "data"}`), or by name only (`{"kind", "name"}`).
+  The server uses the same limits; anything over them goes by name, so you can send only the newest ones with
+  their contents and the rest by name (the request is still 30 MB at most). After a fold, the files of the folded
+  messages go with the FOLDED_MARK message (the newest 50 of them; other messages take up to 5):
+
+```json
+{ "prompt": "Does the plan match the spec?",
+  "history": [
+    { "role": "user", "text": "[Earlier in this conversation, folded into notes]",
+      "files": [ { "kind": "text", "name": "spec.md", "text": "# Spec…" }, { "kind": "image", "name": "old.png" } ] },
+    { "role": "assistant", "text": "Notes: the person is building…" },
+    { "role": "user", "text": "Here is the plan", "files": [ { "kind": "image", "name": "plan.png", "mediaType": "image/png", "data": "<base64>" } ] },
+    { "role": "assistant", "text": "The plan has three stages…" } ] }
+```
+
+## Code: Ask in your folder
+
+`POST /v1/code` runs one coding task on Plus and above (`403 plan_required` otherwise). The model has
+no tools of its own: it asks *you* to list, read, search, write and edit files, and you answer. That's
+what the app's Code tab does with a folder you open; any program can do the same.
+
+```json
+{ "prompt": "Fix the bug in src/add.js", "model": "claude-sonnet-5-5", "folder": "my-site",
+  "history": [{ "role": "user", "text": "…" }, { "role": "assistant", "text": "…" }] }
+```
+
+`history` is the task's earlier turns (you keep them; the server keeps nothing), up to 400; a long task is
+folded into notes like a [conversation](#conversations-history-roles-and-your-own-instructions) (`folded`
+event). `files` works as above.
+The answer streams like `/v1/ask`, plus a `tool` event for each step:
+
+```
+event: tool
+data: {"runId":"…","callId":"1","name":"read_file","input":{"path":"src/add.js"}}
+```
+
+Do it, then answer within 10 minutes (or the step fails and the model is told):
+
+```
+POST /v1/code/{runId}/tools/{callId}
+{ "ok": true, "output": "export const add = (a, b) => a - b;\n" }
+```
+
+`204` when delivered; `404` when the step or task is over, or it isn't your task. Tools:
+`list_files {path?, depth?}`, `read_file {path, offset?, limit?}`, `search {pattern, path?, regex?}`,
+`write_file {path, content}`, `edit_file {path, old_text, new_text}` (old_text must appear exactly once).
+Answer `ok: false` with a reason to refuse a step; the model is told and adjusts. A task is up to 40
+model turns and 20 minutes, and counts against your 5-hour and weekly limits like any other answer.
+
+Ask can also search the web and read pages in a task (laws, prices, documentation), with `web` events as it does
+(see the table above); there's nothing for your program to do for them. It reads only a link that is in the task
+(the prompt, its history or notes) or one its own search found, exactly as written, so a link built from your
+files never goes out.
+
+Send `"commands": true` when your program can run commands where the folder is: the model then also gets
+`run_command {command, timeout_sec?}` (a shell command in the folder; answer with its output and exit
+code). The browser never sends it.
+
+With `"commands": true`, also send `"browser": true` when your program drives a browser window on that
+computer: where the site can offer it (`GET /v1/me` → `browser: true`), the model also gets
+`browser {action, url?, selector?, x?, y?, text?, key?, dy?, width?, height?}`. Actions: `open`, `screenshot`,
+`click`, `type`, `press`, `scroll`, `read`, `console`, `back`, `viewport`, `close`; answer with text and, for
+most, a screenshot in `images`. Your program decides what needs the person's yes (ask-code: any site that
+isn't on the computer itself; it never types into password or card fields). Without `browser: true` in
+`/v1/me`, the task runs as before, without the tool.
+
+### The terminal app
+
+`GET /v1/code/ask-code.mjs` is a ready-made client for this (one file, Node 18+, no dependencies) with the
+site's address filled in. The easiest way in is one line in a terminal, in a project folder:
+
+```sh
+curl -fsSL https://<site>/v1/code/install.sh | sh                          # Mac, Linux
+powershell -c "irm https://<site>/v1/code/install.ps1 | iex"               # Windows (PowerShell or cmd)
+```
+
+The installer uses the computer's Node.js when it's 22 or newer; otherwise it downloads the current LTS from
+nodejs.org, checks it against the SHA-256 nodejs.org publishes and unpacks it into `~/.config/ask-code/node`, for Ask
+alone (no sudo, no administrator). Then it runs ask-code, which makes the `ask` command and starts in that folder.
+Arguments go after `sh -s --` (`… | sh -s -- --browser`), or on Windows after a script block:
+`powershell -c "& ([scriptblock]::Create((irm 'https://<site>/v1/code/install.ps1'))) --browser"`.
+
+The `ask` command: ask-code copies itself to `~/.config/ask-code/ask-code.mjs` and puts a small `ask` launcher in a
+folder already on your PATH that you can write to (`~/.local/bin`, `~/bin`, Node's folder, Homebrew's; on Windows
+npm's folder in `%APPDATA%` or `WindowsApps`). With none, it uses `~/.local/bin` and adds it to your shell's startup
+file (on Windows, npm's folder to your user Path), so a new terminal window has it. After that, `ask` in a terminal in
+any folder starts it there. If another program is already called `ask`, the command is `ask-code`. At each start
+`ask` checks the site for a newer version (`If-None-Match` with its own hash; `304` when it's current) and runs the
+newest. `ASK_NO_INSTALL=1`, or setting `ASK_KEY`, skips making the command; `ASK_NO_UPDATE=1` skips the check.
+
+Without the installer: `curl -fsSLo ask-code.mjs https://<site>/v1/code/ask-code.mjs`, then
+`node ask-code.mjs [folder] [--model sonnet|opus|haiku] [--task "what to do"] [--browser] [--no-ask]` (on Windows,
+`curl.exe`: in Windows PowerShell `curl` is a different command).
+
+Signing in, in a terminal: ask-code shows a QR code and a link (`POST /v1/code/connect`; it opens the link in this
+computer's browser too). Scan it with the phone, or open the link where you use the site, and say yes after a passkey
+check: the terminal gets an API key of its own, named after the computer (Account → API keys lists it; a new one for
+the same computer replaces it). You can also paste an API key while it waits. The code lasts 10 minutes, once.
+
+Without a terminal (a script, a pipe) it asks for an API key once (or takes `ASK_KEY`). The key is kept in
+`~/.config/ask-code/` (0600). Reading
+is automatic; every change shows a diff and every command shows its exact line, and each waits for
+y/n (`a` allows the rest of a task's file changes; commands always ask). `.env` files and keys are
+never read, and a command that names one gets a warning. Commands run with your environment minus
+`ASK_KEY`, a 2-minute default timeout (10 at most), and capped output. `/model`, `/new`, `/exit`;
+Ctrl+C stops the task.
+
+`--no-ask` (or Shift+Tab to "no asking") skips the questions: changes, commands and new sites go ahead on their own,
+except a command that names a private file, which still asks. A command ending in ` &`, or one that starts serving on
+this computer (prints `http://localhost:…`), keeps running past the timeout: Ask gets its first output and address,
+and it runs until you quit or `/apps stop N` (`/apps` lists them).
+
+`--browser` (or `/browser`) gives Ask a browser window of its own: Chrome, Edge, Chromium or Brave from the
+computer, with an empty profile, driven through the browser's DevTools Protocol on that computer only (Node 22+).
+`/watch <page or command> every 5m for "words"` checks a page (in a background tab of that window) or a command on
+a timer, at most every 2 minutes, with no model in the loop, and shows a notice on the computer when it changes.
+
+Captchas and "are you human" checks are the person's: Ask never solves them. It brings its window to the front, shows
+a notice and waits for the person (8 minutes at most). Each of these calls (a captcha or a sign-in to do, a watch
+held up by a check, a watch that found its change) also goes to every device where notifications are on in the app
+(Account → Notifications), through `POST /v1/code/call`:
+
+```json
+{ "kind": "turn", "title": "Ask needs you at your computer", "body": "Tick the box on example.com" }
+```
+
+`kind` is `turn` (Ask is waiting for you: kept 8 minutes), `check` or `news` (kept an hour). The answer is
+`{ "sent": 1, "devices": 1 }`; `devices: 0` means notifications are on nowhere. At most 30 calls in 10 minutes. The
+message is encrypted for each device (Web Push) and not kept on the server.
+
+## Models
+
+| `model` | In the menu as | Plans |
+| --- | --- | --- |
+| `claude-opus-5-5` | Opus 5.5 | Pro, Max |
+| `claude-fable-5-1` | Fable 5.1: Opus 5.5 answers, thinking hard (the usage event says Opus) | Pro, Max |
+| `claude-sonnet-5-5` | Sonnet 5.5 (default) | all |
+| `claude-haiku-5-5` | Haiku 5.5 | all |
+
+`GET /v1/me` → `models` lists the ones your account may use. Anything else is `400 unknown_model`.
+The model never has tools: it can't open files, run code or browse the web.
+
+## Limits and usage
+
+Two layers of limits; the server tracks both and tells you which one stopped you.
+
+**1. Your plan** (`GET /v1/usage` → `{limits}`, also in `GET /v1/me` and in every stream's `limits` event):
+
+```json
+{ "plan": "free", "kind": "asks", "used": 7, "limit": 20, "resetsAt": "2026-10-18T00:00:00.000Z" }
+```
+
+| `kind` | Meaning |
+| --- | --- |
+| `asks` | Free plan: questions per day (chat turns count too), reset at midnight **in your time zone** |
+| `windows` | Plus / Pro / Max: a **5-hour limit** and a **weekly limit** |
+| `subscription` | the owner's account: no limits of ours |
+
+On a paid plan both windows are in `windows`; `used`, `limit` and `resetsAt` at the top describe
+whichever window is closer to its limit. Amounts are what the answers cost, in USD (show people a
+percentage). A window starts with its first question; `resetsAt: null` means it hasn't started yet.
+
+```json
+{
+  "plan": "plus", "kind": "windows", "used": 1.2, "limit": 4, "resetsAt": "2026-10-18T14:20:00.000Z",
+  "windows": {
+    "session": { "used": 1.2, "limit": 4, "resetsAt": "2026-10-18T14:20:00.000Z" },
+    "week": { "used": 3.5, "limit": 25, "resetsAt": "2026-10-24T09:20:00.000Z" }
+  }
+}
+```
+
+| Plan | Price | 5-hour limit | Weekly limit | Models |
+| --- | --- | --- | --- | --- |
+| Free | $0 | 20 questions a day | | Sonnet, Haiku |
+| Plus | $20 a month | $4 | $25 | Sonnet, Haiku |
+| Pro | $100 a month | $20 (5× Plus) | $125 | all four |
+| Max | $200 a month | $80 (20× Plus) | $500 | all four |
+
+These are estimated in API dollars; the owner can change them in the admin dashboard. Nothing is charged: in the beta plans switch for free, and the test
+checkout takes no money. Changing plans keeps the running
+windows: a bigger plan raises the limits, it doesn't reset them.
+
+A question is counted before the model runs and **given back** if no text came out (provider down,
+everything busy, cap reached). A stopped answer counts what was written. On a paid plan the last
+answer may finish even if it crosses 100%. The owner can set personal limits per account, which win
+over the plan.
+
+**2. The model provider's limits.** The AI provider's subscription behind the service has its own usage
+windows (5 hours and 7 days). The server reads them from every answer, shows them
+to the owner in the admin dashboard, and when one is used up it stops starting answers until the
+window resets: you get `error` with `code: "subscription_limit"` and `retryAt` (the reset time), and
+your question is given back.
+
+**Per network:** 60 questions a minute (guests and Free; paid accounts aren't counted per IP), 5 new guest sessions
+an hour, 30 sign-in attempts a minute (`429 too_many_requests`, `Retry-After`).
+
+## Errors
+
+### Before the stream (JSON, with an HTTP status)
+
+| Status | `error.type` | `error.code` | Meaning, what to do |
+| --- | --- | --- | --- |
+| 400 | `invalid_request_error` | `invalid_body` | a field is missing or wrong; `message` names it |
+| 400 | `invalid_request_error` | `unknown_model` | pick a model from [Models](#models) |
+| 400 | `invalid_request_error` | `too_many_keys` | 10 keys per account; delete one |
+| 401 | `authentication_error` | `unauthenticated` | no token, expired, deleted key, or signed out; sign in again |
+| 403 | `permission_error` | `account_required` | needs an account (guests can't chat) |
+| 403 | `permission_error` | `model_not_in_plan` | that model is part of Pro |
+| 403 | `permission_error` | `session_required` | do it in the app; API keys can't manage access |
+| 403 | `permission_error` | `signups_closed` | no guest trial here; create an account |
+| 403 | `permission_error` | `admin_only` | the admin API is for the owner |
+| 402 | `invalid_request_error` | `payment_required` | checkout on: buy the plan at `POST /v1/checkout` |
+| 409 | `invalid_request_error` | `plan_paid`, `plan_blocked` | a paid month is running; `message` says until when |
+| 404 | `not_found_error` | `not_found` | doesn't exist, or isn't yours |
+| 409 | `authentication_error` | `refresh_race` | two refreshes at once; retry in a moment |
+| 429 | `insufficient_quota` | `quota_exceeded` | your plan's limit; `Retry-After` = seconds until it resets |
+| 429 | `rate_limit_error` | `too_many_requests` | slow down; `Retry-After` says how long. More answers at once than your plan runs, after waiting 2 minutes for a place (Free 2, Plus 5, Pro 10, Max 20); guests and Free: 60 questions a minute per IP |
+| 400 | `invalid_request_error` | `bad_event_id` | `Last-Event-ID` / `after` isn't a whole number |
+| 409 | `invalid_request_error` | `already_answered` | that `Idempotency-Key` was used for an answer that's over; `GET /v1/runs/{runId}` |
+| 410 | `invalid_request_error` | `replay_gone` | too long ago to pick up that answer |
+| 503 | `overloaded_error` | `restarting` | the server is updating (a few seconds to a minute); try again after `Retry-After` |
+| 500 | `api_error` | `internal` | our fault; retry |
+
+### In the stream (`event: error`)
+
+| `code` | `retryable` | Meaning | The server already… |
+| --- | --- | --- | --- |
+| `subscription_limit` | no | the provider account's usage window is used up | stops starting answers until `retryAt`; gives your question back |
+| `provider_rate_limited` | yes | the provider says "too many right now" | retried several times, with pauses, before any text |
+| `provider_overloaded` | yes | the provider is overloaded | retried several times, with pauses, before any text |
+| `network` | yes | couldn't reach the provider | retried twice before any text |
+| `cli_crashed` | yes | the model process died | retried twice before any text |
+| `provider_error` | depends | anything else from the provider | retried if it was a 5xx |
+| `timeout` | depends | no output for 90 s, or over the time limit (2 min ask, 3 min chat) | killed the run; charged only for text written |
+| `node_busy` | yes | every answer slot stayed busy for 30 s | — |
+| `context_too_long` | no | the question (plus chat history) doesn't fit the model | shorten it, or start a new chat |
+| `model_unavailable` | no | the model isn't available right now | pick another model |
+| `invalid_request` | no | the provider refused the request | rephrase |
+| `provider_auth` | no | the server's model login has expired | the owner has to sign it in again |
+| `stopped` | no | you stopped it (`POST /v1/runs/{runId}/stop`) | billed only what was written |
+| `disconnected` | yes | the connection dropped and nobody came back for 2 minutes | stopped it; billed only what was written. Seen only when you [pick it up](#if-the-connection-drops) late |
+| `restarting` | yes | the server restarted for an update before the answer could finish | rare: an update waits up to 90 s for answers in progress. Ask again |
+| `runner_unavailable` | yes | no answer server could take it | retried; try again a bit later |
+| `provider_unavailable` | no | that model isn't available right now | pick another model |
+| `bad_request`, `tools_disabled` | yes | something went wrong on our side | try again |
+
+`message` is always a sentence you can show to people as is. It never blames them and says what to
+do next; when a reset time is known it's in it, in the person's own time zone ("Answers come back at
+18:00."). `retryAt` carries the same time as ISO 8601.
+
+## Retries
+
+What the server does for you:
+- Temporary failures (`retryable: true`) that happen **before any text was sent** are retried up to
+  twice (after 1 s and 3 s). You only see the error if all attempts failed.
+- After text has started, nothing is sent twice: if the answer server fails mid-answer, another one carries
+  on from the text you already have, in the same stream. If none can, you get the error; what arrived so far
+  is kept (chats store it as a partial answer).
+- While the provider's usage window is used up, no answer is started; you get `subscription_limit`
+  with `retryAt` at once, and the question isn't counted.
+
+What you should do:
+- `retryable: true` or HTTP 5xx: wait and try again, with exponential backoff (2 s, 4 s, 8 s…), with the
+  same `Idempotency-Key` so a retry never makes a second answer.
+- A dropped connection: don't ask again, [pick it up](#if-the-connection-drops).
+- `retryAt` or `Retry-After`: wait until then.
+- `retryable: false`: change something first (shorter prompt, another model, sign in, upgrade).
+
+## Account and keys
+
+| Request | Notes |
+| --- | --- |
+| `GET /v1/me` | who you are: `id, status (guest/active), plan, memoryChat, models, limits, admin, planPeriod` |
+| `GET /v1/usage` | `{limits}` only |
+| `GET /v1/plans` | the plans and what they include (public) |
+| `POST /v1/plan` | `{"plan": "free" \| "plus" \| "pro" \| "max"}` — browser session; free during the beta. With the checkout on: `402 payment_required` for a paid plan, `409 plan_paid` for Free while a paid month runs |
+| `GET /v1/checkout/quote?plan=pro` | `{plan, priceUsd, creditUsd, dueUsd, endsAt, blocked}` — what a month costs you now; `blocked` says why you can't buy it yet — browser session |
+| `POST /v1/checkout` | `{"plan": "plus"}` → `{receipt: {id, plan, priceUsd, creditUsd, amountUsd, paidAt, endsAt, test}, me}` — a month of the plan; test checkout: nothing is charged (`409 plan_blocked`, `400 checkout_off`) |
+| `GET /v1/keys` | your API keys (names, prefixes, last use) — browser session |
+| `POST /v1/keys` | `{"name": "laptop script"}` → `{id, name, prefix, key}`; the key is shown only here |
+| `DELETE /v1/keys/{id}` | `id` = the prefix; the key stops working at once |
+| `GET /v1/passkeys`, `DELETE /v1/passkeys/{id}` | your passkeys — browser session |
+| `POST /v1/auth/recovery-code` | a new backup code (the old one stops working) — browser session |
+| `DELETE /v1/account` | erases the account, chats, keys, usage and workspace — browser session |
+
+## Admin API (owner only)
+
+The admin dashboard (`/admin` in the app) is built on these; a browser session of the owner's
+account is required (`403 admin_only` otherwise). They return numbers and metadata only, never chat
+content or IPs. Every change is written to the audit log.
+
+| Request | Returns / does |
+| --- | --- |
+| `GET /v1/admin/overview` | server health, answer slots, the provider login and its usage windows, today and this month |
+| `GET /v1/admin/servers` | every server (from each one's 30-second report): machine, runner, AI login, the provider's limits as last reported, spend for 5 hours / today / 7 days; then each person's use of their own allowance |
+| `GET /v1/admin/users?filter=&q=&skip=` | users (`filter`: all, accounts, guests, paid, expiring, suspended; `q`: id prefix) |
+| `GET /v1/admin/users/{id}` | one user: plan, period, payments, limits, 30 days of usage, devices |
+| `PATCH /v1/admin/users/{id}/limits` | `{"dailyAsks"?: n \| null, "sessionUsd"?: n \| null, "weekUsd"?: n \| null}` personal limits |
+| `POST /v1/admin/users/{id}/plan` | `{"plan", "endsAt"?, "autoRenew"?, "resetUsage"?}` |
+| `POST /v1/admin/users/{id}/payments` | `{"amountUsd", "method", "plan", "months", "note"?}` records a payment and extends the plan |
+| `POST /v1/admin/payments/{id}/refund` | marks a payment refunded |
+| `POST /v1/admin/users/{id}/suspend` | `{"suspended": true \| false}`; suspending signs them out everywhere |
+| `POST /v1/admin/users/{id}/signout` | ends every session |
+| `DELETE /v1/admin/users/{id}` | erases the user (payments stay, without the person) |
+| `GET /v1/admin/billing` | revenue, recurring revenue, plans ending soon / ended, payments |
+| `GET /v1/admin/usage?days=1\|7\|30` | per model: answers, failures, tokens, cost, time to first word; top users |
+| `GET/PUT /v1/admin/settings` | default limits, prices, and `checkout` (`off` \| `test`) |
+| `GET /v1/admin/telegram` | `{bot, connected, fromEnv, link}` |
+| `PUT /v1/admin/telegram` | `{"token"}` from @BotFather: checked, stored encrypted; answers the one-time `link` to tap Start in |
+| `POST /v1/admin/telegram/test` · `DELETE /v1/admin/telegram` | send a test message · turn the bot off |
+| `GET /v1/admin/audit` | the last 200 admin actions |
+
+## Privacy
+
+- Questions and answers are never logged. Logs hold IDs, routes, timings and token counts.
+- `/v1/ask` keeps no text at all, only a usage record (model, tokens, cost, time).
+- Chat titles, messages and the files sent in chats are encrypted at rest with a key per account.
+- Your IP is used only by the per-network limits, in memory, for at most an hour; it never reaches
+  the model provider.
+- Each account's answers run in its own directory on the server, separate from every other account,
+  erased when the account is deleted. The model has no tools, so it can't read any file at all.
+- The model is told the name of that directory (the CLI always does), so the name is an opaque key,
+  never your account id, and the model is told to keep server details out of its answers.
+
+## All endpoints
+
+| Method | Path | Who |
+| --- | --- | --- |
+| GET | `/v1/config` | anyone |
+| GET | `/v1/plans` | anyone |
+| POST | `/v1/auth/guest` | anyone (not on a private site) |
+| POST | `/v1/auth/refresh`, `/v1/auth/logout` | browser |
+| POST | `/v1/auth/passkey/register/options`, `/register/verify` | browser |
+| POST | `/v1/auth/passkey/login/options`, `/login/verify` | browser |
+| POST | `/v1/auth/recover` | browser (backup code) |
+| POST | `/v1/auth/recovery-code` | browser session |
+| GET | `/v1/me`, `/v1/usage` | any token |
+| PATCH | `/v1/me` (`{name}`: how Ask greets you) | browser session |
+| GET | `/v1/docs` | anyone: this page (Markdown) |
+| POST | `/v1/auth/qr/start` · `/v1/auth/qr/{id}/claim` | browser (a computer signing in with the phone) |
+| GET, POST | `/v1/auth/qr/{id}` · `/v1/auth/qr/{id}/approve`, `/deny` | browser session on the phone |
+| POST | `/v1/ask` · `/v1/runs/{runId}/stop` | any token |
+| GET | `/v1/runs/{runId}/events` · `/v1/runs/{runId}` | the run's own token: [pick up a dropped stream, or how it ended](#if-the-connection-drops) |
+| GET, POST | `/v1/conversations` | account (session or key) |
+| GET, DELETE | `/v1/conversations/{id}` | account (session or key) |
+| GET | `/v1/conversations/{id}/files/{fileId}` | account (session or key) |
+| POST | `/v1/conversations/{id}/messages` | account (session or key) |
+| POST | `/v1/code` · `/v1/code/{runId}/tools/{callId}` | account on Plus and above (session or key) |
+| GET | `/v1/code/ask-code.mjs` | anyone (the terminal app) |
+| POST | `/v1/code/call` | account (session or key): [a notice on the person's devices](#the-terminal-app) |
+| GET | `/v1/push/key` | anyone (the key browsers subscribe with) |
+| PUT, DELETE | `/v1/push` | browser session (this device's notifications on, off) |
+| POST | `/v1/plan` | browser session |
+| GET, POST | `/v1/checkout/quote`, `/v1/checkout` | browser session (accounts) |
+| GET, POST | `/v1/keys` · DELETE `/v1/keys/{id}` | browser session |
+| GET | `/v1/passkeys` · DELETE `/v1/passkeys/{id}` | browser session |
+| DELETE | `/v1/account` | browser session (guests too) |
+| * | `/v1/admin/*` | the owner's browser session |
