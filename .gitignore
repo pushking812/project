@@ -8,3 +8,18 @@ postman/.cloud.json
 *.log
 test-proj/
 ask-code.mjs
+# Leftovers of manual and Cline test runs
+cline-run.out
+.vscode/mcp.json.bak-*
+/copy.txt
+/hello.txt
+/hello-postman.txt
+/pm-insp.txt
+/session-note.txt
+test/.vscode/
+test/bin/
+test/*.png
+test/resources.resx
+test/test.pq
+test/test.proj
+test/test.query.pq
