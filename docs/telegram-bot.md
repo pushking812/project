@@ -44,6 +44,8 @@ cd mcp
 | `TELEGRAM_ALLOWED_CHAT_IDS` | = список пользователей | чаты (нужно для групп) |
 | `TELEGRAM_ALLOW_ANY` | `0` | `1` — разрешить всех (только осознанно) |
 | `TELEGRAM_MCP_URL` | `ASK_URL` → `http://127.0.0.1:8000/mcp` | адрес MCP; не loopback без `TELEGRAM_ALLOW_REMOTE=1` запрещён |
+| `TELEGRAM_PROXY` | нет | прокси для Bot API: `http://…`, `https://…`, `socks5://…`, `socks5h://…` |
+| `TELEGRAM_PROXY_USERNAME` / `TELEGRAM_PROXY_PASSWORD` | нет | логин и пароль прокси; подставляются в адрес с экранированием |
 | `TELEGRAM_DEFAULT_MODE` | `plan` | режим `/exec`: `plan` ничего не меняет |
 | `TELEGRAM_ALLOW_DANGEROUS` | `0` | `1` — разрешить запись файлов, команды, очистку памяти (с подтверждением) |
 | `TELEGRAM_TASK_TIMEOUT` | `900` | сколько секунд бот ждёт фоновую задачу |
@@ -53,6 +55,45 @@ cd mcp
 | `TELEGRAM_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`; лог только в stderr |
 
 Все переменные читаются из `mcp\.env` и окружения; уже заданная переменная окружения сильнее `.env`.
+
+## Прокси: если `api.telegram.org` блокируется
+
+Прокси нужен только для запросов к Telegram. MCP-сервер и Node API остаются локальными: бот ходит к ним
+напрямую (`trust_env=False`), поэтому системный `HTTPS_PROXY` их не ломает.
+
+```ini
+# mcp\.env — вариант 1: прокси без пароля
+TELEGRAM_PROXY=http://127.0.0.1:8080
+
+# вариант 2: SOCKS5 (типичный локальный клиент)
+TELEGRAM_PROXY=socks5://127.0.0.1:1080
+
+# вариант 3: логин и пароль отдельными строками (экранирование делает бот)
+TELEGRAM_PROXY=http://proxy.example.com:3128
+TELEGRAM_PROXY_USERNAME=user
+TELEGRAM_PROXY_PASSWORD=p@ss:word
+```
+
+- Поддерживаются `http`, `https`, `socks5`, `socks5h`. Для SOCKS нужен пакет `socksio` — он добавлен
+  в `requirements.txt`, при обновлении окружения поставьте заново:
+  `.venv\Scripts\python.exe -m pip install -r requirements.txt`.
+- Если `TELEGRAM_PROXY` не задан, `httpx` сам возьмёт `HTTPS_PROXY` / `ALL_PROXY` из окружения
+  (и `NO_PROXY`, если задан). Явный `TELEGRAM_PROXY` сильнее переменных окружения.
+- **MTProto-прокси Telegram (tg://proxy) не подходит**: Bot API работает по HTTPS, ему нужен обычный
+  HTTP/SOCKS-прокси. Если есть только MTProto, поднимите локальный HTTP/SOCKS-прокси или используйте
+  локальный Bot API server (см. ниже).
+- Пароль прокси не попадает в логи и тексты ошибок: `check_bot.py` печатает адрес как `http://***@host:port`.
+- Вместо прокси можно поднять свой Bot API server и указать `TELEGRAM_API_URL=http://127.0.0.1:8081`
+  (по `http://` разрешён только loopback — токен иначе ушёл бы открытым).
+
+Проверка после настройки:
+
+```
+cd mcp
+.venv\Scripts\python.exe check_bot.py
+```
+
+Строка `[OK] настройки … прокси http://***@127.0.0.1:8080` и `[OK] токен @your_bot` означают, что прокси работает.
 
 ## Команды
 
@@ -155,6 +196,8 @@ cd mcp
 | Симптом | Причина и действие |
 |---|---|
 | `TELEGRAM_BOT_TOKEN не задан` | добавьте токен в `mcp\.env`, перезапустите бота |
+| `Telegram недоступен: ConnectError: All connection attempts failed` | нет доступа к `api.telegram.org`: задайте `TELEGRAM_PROXY` (см. раздел «Прокси») |
+| `Using SOCKS proxy, but the 'socksio' package is not installed` | обновите зависимости: `.venv\Scripts\python.exe -m pip install -r requirements.txt` |
 | `Telegram не принял токен: 401` | токен отозван или скопирован с пробелом |
 | `MCP-сервер не отвечает на http://127.0.0.1:8000/mcp` | не запущен `server.py --http`: `run_server.ps1` или `/svc start` |
 | Инструменты возвращают «Сервер API не отвечает на http://127.0.0.1:8737» | не запущен `npm start` (Node-сервер) |

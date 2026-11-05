@@ -345,7 +345,10 @@ notepad .env                                    # TELEGRAM_BOT_TOKEN, TELEGRAM_A
 ```
 
 Команды: `/help`, `/status`, `/exec`, `/plan`, `/task`, `/stop`, `/ask`, `/tools`, `/call`, `/ws`, `/cd`, `/ls`,
-`/cat`, `/sessions`, `/browser`, `/doctor`, `/svc`. Полное описание, переменные и ограничения —
+`/cat`, `/sessions`, `/browser`, `/doctor`, `/svc`. Если `api.telegram.org` блокируется, задайте `TELEGRAM_PROXY` (`http://`, `https://`, `socks5://`; для SOCKS нужен
+`socksio` из `requirements.txt`). Прокси используется только для Telegram: MCP-сервер остаётся локальным.
+
+Полное описание, переменные и ограничения —
 [docs/telegram-bot.md](../docs/telegram-bot.md).
 
 ## Проверка
