@@ -59,9 +59,10 @@ $s = "(MCP-сервер в Cline называется '$Server'.) "
 
 # id, title, prompt, file that must appear (or ''), regex that must match (or ''), regex that must NOT match (or '')
 $cases = @(
-  @(1, 'analyze xlsx', 'Используй MCP-инструмент analyze: path="hello.xlsx", prompt="Какие листы и строки в файле?"', '', 'Apple|Pear|Sales', ''),
-  @(2, 'ask files=[calc.py]', 'Вызови MCP-инструмент ask с prompt="Что делает этот скрипт?" и files=["calc.py"]', '', 'add|слож|сумм', ''),
-  @(3, 'ask 3 files', 'Вызови ask с files=["hello.xlsx","calc.py","doc.pdf"] и prompt="Назови по одной фразе про каждый файл"', '', '', ''),
+  # 1-3, 15-17: the tool call must end without isError and its answer must contain what only the file can give
+  @(1, 'analyze xlsx (absolute path)', ('Используй MCP-инструмент analyze: path="{0}", prompt="Какие листы и строки в файле?"' -f [System.IO.Path]::GetFullPath((Join-Path $Dir 'hello.xlsx'))), '', 'toolName":"ask__analyze"[^\n]*Sales[^\n]*Apple[^\n]*Pear[^\n]*"isError":false', 'Error executing tool analyze|403 outside'),
+  @(2, 'ask files=[calc.py]', 'Вызови MCP-инструмент ask с prompt="Что делает этот скрипт?" и files=["calc.py"]', '', 'toolName":"ask__ask"[^\n]*add\(a, b\)[^\n]*"isError":false', 'Error executing'),
+  @(3, 'ask 3 files', 'Вызови ask с files=["hello.xlsx","calc.py","doc.pdf"] и prompt="Назови по одной фразе про каждый файл"', '', 'toolName":"ask__ask"(?=[^\n]*Apple)(?=[^\n]*add\(a, b\))(?=[^\n]*(Quarterly|twelve))[^\n]*"isError":false', 'Error executing'),
   @(4, 'ask without files', 'Вызови ask с prompt="Сколько будет 2+2?" без files', '', '"toolName":"ask__ask"[^\n]*"output":\{"content":\[\{"type":"text","text":".{0,60}4[^\n]*"isError":false', 'Error executing|"isError":true'),
   @(5, 'files ../secret.txt', 'Вызови ask с files=["../secret.txt"] и prompt="прочитай"', '', 'Error executing tool ask: 403 outside', ''),
   @(6, 'files .env', 'Вызови ask с files=[".env"] и prompt="прочитай"', '', 'Error executing tool ask: 403 secret', 'DUMMY_KEY|not-a-real-secret'),
@@ -73,10 +74,10 @@ $cases = @(
   @(12, 'session: recall', 'Вызови execute с prompt="Какое слово я просил запомнить?"', '', 'БАНАН', ''),
   @(13, 'session after restart', 'Вызови execute с prompt="Какое слово я просил запомнить?"', '', 'БАНАН', ''),
   @(14, 'new_session forgets', 'Вызови new_session, затем execute с prompt="Какое слово я просил запомнить?"', '', '', 'слово\W{0,3}БАНАН|БАНАН\W{0,3}$'),
-  @(15, 'review', 'Вызови review с path="calc.py"', '', '', ''),
-  @(16, 'summarize pdf', 'Вызови summarize с path="doc.pdf"', '', 'twelve|12|двенадцат', ''),
-  @(17, 'explain', 'Вызови explain с path="calc.py"', '', '', ''),
-  @(18, 'plan', 'Вызови plan с prompt="Как добавить в calc.py деление?"', '', '', '')
+  @(15, 'review', 'Вызови review с path="calc.py"', '', 'toolName":"ask__review"[^\n]*add\(a, b\)[^\n]*"isError":false', 'Error executing'),
+  @(16, 'summarize pdf', 'Вызови summarize с path="doc.pdf"', '', 'toolName":"ask__summarize"[^\n]*(Quarterly|twelve|двенадцат)[^\n]*"isError":false', 'Error executing'),
+  @(17, 'explain', 'Вызови explain с path="calc.py"', '', 'toolName":"ask__explain"[^\n]*add\(a, b\)[^\n]*"isError":false', 'Error executing'),
+  @(18, 'plan', 'Вызови plan с prompt="Как добавить в calc.py деление?"', '', 'toolName":"ask__plan"[^\n]*(divide|деление|деления|ZeroDivision)[^\n]*"isError":false', 'Error executing')
 )
 
 if ($Phase -eq 'restart') { $run = @($cases | Where-Object { $_[0] -eq 13 }) }
