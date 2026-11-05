@@ -46,6 +46,7 @@ cd mcp
 | `TELEGRAM_MCP_URL` | `ASK_URL` → `http://127.0.0.1:8000/mcp` | адрес MCP; не loopback без `TELEGRAM_ALLOW_REMOTE=1` запрещён |
 | `TELEGRAM_PROXY` | нет | прокси для Bot API: `http://…`, `https://…`, `socks5://…`, `socks5h://…` |
 | `TELEGRAM_PROXY_USERNAME` / `TELEGRAM_PROXY_PASSWORD` | нет | логин и пароль прокси; подставляются в адрес с экранированием |
+| `TELEGRAM_API_URL` | `https://api.telegram.org` | адрес Bot API или свой relay (Cloudflare Worker и подобные); `http://` только для loopback |
 | `TELEGRAM_DEFAULT_MODE` | `plan` | режим `/exec`: `plan` ничего не меняет |
 | `TELEGRAM_ALLOW_DANGEROUS` | `0` | `1` — разрешить запись файлов, команды, очистку памяти (с подтверждением) |
 | `TELEGRAM_TASK_TIMEOUT` | `900` | сколько секунд бот ждёт фоновую задачу |
@@ -94,6 +95,43 @@ cd mcp
 ```
 
 Строка `[OK] настройки … прокси http://***@127.0.0.1:8080` и `[OK] токен @your_bot` означают, что прокси работает.
+
+### Вместо прокси: свой relay к Bot API (Cloudflare Worker и подобные)
+
+Если раньше вы поднимали «воркер» на иностранном сервисе (например, Cloudflare Workers с адресом
+`https://<имя>.<аккаунт>.workers.dev`), его можно использовать и сейчас — не как прокси, а как адрес API:
+
+```ini
+TELEGRAM_API_URL=https://tg.example.workers.dev
+```
+
+Бот обращается к `<TELEGRAM_API_URL>/bot<токен>/<метод>` — ровно те же пути, что у `api.telegram.org`.
+Поэтому подходит любой relay, который просто пересылает запрос:
+
+```js
+// Cloudflare Worker: пересылает всё в Bot API
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+    return fetch("https://api.telegram.org" + url.pathname + url.search, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+    });
+  },
+};
+```
+
+Важно:
+
+- `https://` для внешнего адреса обязателен: по `http://` разрешён только loopback, иначе токен ушёл бы открытым.
+- Токен проходит через этот сервис — используйте только **свой** worker (не публичные relay).
+- `TELEGRAM_API_URL` и `TELEGRAM_PROXY` независимы: relay не требует прокси, а прокси не требует relay.
+- Long polling (`getUpdates` с таймаутом 25 с) — это один запрос на цикл, лимитов бесплатного тарифа Cloudflare
+  (100 000 запросов в сутки) хватает с запасом.
+- `check_bot.py` печатает выбранный адрес: `[OK] настройки … API https://tg.example.workers.dev …`.
+- Вместо Cloudflare подойдут Vercel, Deno Deploy, Netlify Functions или nginx на VPS — важно лишь,
+  чтобы путь и тело POST доходили до Bot API без изменений.
 
 ## Команды
 
