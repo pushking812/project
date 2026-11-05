@@ -344,7 +344,7 @@ notepad .env                                    # TELEGRAM_BOT_TOKEN, TELEGRAM_A
 .\.venv\Scripts\python.exe check_bot.py         # токен и связь с MCP, без сообщений
 ```
 
-Команды: `/help`, `/status`, `/exec`, `/plan`, `/task`, `/stop`, `/ask`, `/tools`, `/call`, `/ws`, `/cd`, `/ls`,
+Команды: `/help`, `/status`, `/exec`, `/plan`, `/run`, `/task`, `/stop`, `/ask`, `/tools`, `/call`, `/ws`, `/cd`, `/ls`,
 `/cat`, `/sessions`, `/browser`, `/doctor`, `/svc`. Если `api.telegram.org` блокируется, задайте `TELEGRAM_PROXY` (`http://`, `https://`, `socks5://`; для SOCKS нужен
 `socksio` из `requirements.txt`). Прокси используется только для Telegram: MCP-сервер остаётся локальным.
 
