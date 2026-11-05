@@ -28,7 +28,11 @@ async def main() -> None:
         report(False, "настройки", str(e))
         return
     proxy = redact_proxy(cfg.proxy) if cfg.proxy else "не задан (HTTPS_PROXY/ALL_PROXY из среды, если есть)"
-    report(True, "настройки", f"пользователей {len(cfg.allowed_users)}, MCP {cfg.mcp_url}, прокси {proxy}")
+    report(
+        True,
+        "настройки",
+        f"пользователей {len(cfg.allowed_users)}, API {cfg.api_url}, MCP {cfg.mcp_url}, прокси {proxy}",
+    )
 
     tg = TgApi(cfg.token, cfg.api_url, proxy=cfg.proxy)
     try:

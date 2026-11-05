@@ -100,6 +100,8 @@ def test_api_url_http_only_for_loopback():
     with pytest.raises(ConfigError):
         load_config(env(TELEGRAM_API_URL="http://evil.example.com"))
     assert load_config(env(TELEGRAM_API_URL="http://127.0.0.1:8081")).api_url == "http://127.0.0.1:8081"
+    relay = load_config(env(TELEGRAM_API_URL="https://tg.example.workers.dev"))
+    assert relay.api_url == "https://tg.example.workers.dev"
 
 
 def test_proxy_is_optional():

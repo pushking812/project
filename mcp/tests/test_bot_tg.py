@@ -11,14 +11,14 @@ from ask_mcp.bot.tg import TgApi, TgError
 TOKEN = "123456789:AAtest-token"
 
 
-def api(handler):
+def api(handler, api_url="https://api.telegram.org"):
     seen: list[httpx.Request] = []
 
     def wrapped(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         return handler(request)
 
-    return TgApi(TOKEN, "https://api.telegram.org", transport=httpx.MockTransport(wrapped)), seen
+    return TgApi(TOKEN, api_url, transport=httpx.MockTransport(wrapped)), seen
 
 
 def ok(payload):
@@ -43,6 +43,17 @@ def test_send_message_payload_and_path():
     assert body["reply_markup"] == {"inline_keyboard": []}
     assert body["reply_parameters"]["message_id"] == 5
     assert "parse_mode" not in body  # текст инструментов не экранируется
+
+
+def test_relay_api_url_keeps_bot_path():
+    """Свой relay (Cloudflare Worker и подобные): адрес другой, путь /bot<token>/метод тот же."""
+    client, seen = api(ok({"id": 1, "username": "test_bot"}), api_url="https://tg.example.workers.dev")
+    try:
+        run(client.get_me())
+    finally:
+        run(client.close())
+    assert seen[0].url.host == "tg.example.workers.dev"
+    assert seen[0].url.path == f"/bot{TOKEN}/getMe"
 
 
 def test_get_updates_offset_and_timeout():
