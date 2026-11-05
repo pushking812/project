@@ -188,7 +188,7 @@ async def main() -> None:
 
     worker = McpWorker(cfg.mcp_url)
     await worker.start()
-    tg = TgApi(cfg.token, cfg.api_url)
+    tg = TgApi(cfg.token, cfg.api_url, proxy=cfg.proxy)
     app = None
     try:
         me = await tg.get_me()

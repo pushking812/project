@@ -4,11 +4,19 @@
 Разметка (parse_mode) не используется: ответы инструментов — обычный текст, и экранировать его не нужно.
 """
 
+import re
 from typing import Any
 
 import httpx
 
-from .config import DEFAULT_API_URL
+from .config import DEFAULT_API_URL, redact_proxy
+
+
+def _redact(text: str, proxy: str | None) -> str:
+    """Убрать из текста ошибки логин и пароль прокси: httpx может показать адрес целиком."""
+    if proxy:
+        text = text.replace(proxy, redact_proxy(proxy))
+    return re.sub(r"(://)[^/@\s]+@", r"\1***@", text)
 
 
 class TgError(Exception):
@@ -33,12 +41,19 @@ class TgApi:
         api_url: str = DEFAULT_API_URL,
         *,
         timeout: float = 30.0,
+        proxy: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self._token = token
         self._base = f"{api_url.rstrip('/')}/bot{token}"
         self._timeout = timeout
-        self._client = httpx.AsyncClient(base_url=self._base, timeout=timeout, transport=transport)
+        self._proxy = proxy
+        client_kwargs: dict[str, Any] = {"base_url": self._base, "timeout": timeout, "transport": transport}
+        if proxy:
+            # Явный прокси сильнее HTTPS_PROXY/ALL_PROXY и NO_PROXY из окружения.
+            client_kwargs["proxy"] = proxy
+            client_kwargs["trust_env"] = False
+        self._client = httpx.AsyncClient(**client_kwargs)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -61,7 +76,7 @@ class TgApi:
         try:
             response = await self._client.post(method, timeout=read_timeout or self._timeout, **kwargs)
         except httpx.HTTPError as e:
-            raise TgError(f"Telegram недоступен: {type(e).__name__}: {e}") from e
+            raise TgError(_redact(f"Telegram недоступен: {type(e).__name__}: {e}", self._proxy)) from e
         try:
             body = response.json()
         except ValueError:

@@ -2,7 +2,7 @@
 
 import pytest
 
-from ask_mcp.bot.config import ConfigError, load_config, parse_ids
+from ask_mcp.bot.config import ConfigError, load_config, parse_ids, redact_proxy
 
 
 def env(**kw):
@@ -100,3 +100,46 @@ def test_api_url_http_only_for_loopback():
     with pytest.raises(ConfigError):
         load_config(env(TELEGRAM_API_URL="http://evil.example.com"))
     assert load_config(env(TELEGRAM_API_URL="http://127.0.0.1:8081")).api_url == "http://127.0.0.1:8081"
+
+
+def test_proxy_is_optional():
+    assert load_config(env()).proxy is None
+
+
+def test_proxy_schemes_accepted():
+    for url in ("http://127.0.0.1:8080", "https://proxy.local:3128", "socks5://127.0.0.1:1080",
+                "socks5h://127.0.0.1:1080"):
+        assert load_config(env(TELEGRAM_PROXY=url)).proxy == url
+
+
+def test_proxy_bad_value():
+    with pytest.raises(ConfigError) as e:
+        load_config(env(TELEGRAM_PROXY="127.0.0.1:8080"))  # без схемы
+    assert "TELEGRAM_PROXY" in str(e.value)
+    with pytest.raises(ConfigError):
+        load_config(env(TELEGRAM_PROXY="ftp://127.0.0.1:21"))
+
+
+def test_proxy_credentials_injected_and_redacted():
+    cfg = load_config(
+        env(
+            TELEGRAM_PROXY="http://127.0.0.1:8080",
+            TELEGRAM_PROXY_USERNAME="u@x",
+            TELEGRAM_PROXY_PASSWORD="p:/1",
+        )
+    )
+    assert cfg.proxy == "http://u%40x:p%3A%2F1@127.0.0.1:8080"
+    shown = redact_proxy(cfg.proxy)
+    assert shown == "http://***@127.0.0.1:8080"
+    assert "u%40x" not in shown and "p%3A" not in shown
+
+
+def test_proxy_credentials_from_url_are_kept():
+    cfg = load_config(env(TELEGRAM_PROXY="socks5://user:pass@127.0.0.1:1080"))
+    assert cfg.proxy == "socks5://user:pass@127.0.0.1:1080"
+    assert redact_proxy(cfg.proxy) == "socks5://***@127.0.0.1:1080"
+
+
+def test_redact_proxy_without_credentials():
+    assert redact_proxy("http://127.0.0.1:8080") == "http://127.0.0.1:8080"
+    assert redact_proxy(None) == "не задан"

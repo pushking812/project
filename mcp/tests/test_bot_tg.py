@@ -116,6 +116,45 @@ def test_set_my_commands():
     }
 
 
+def test_proxy_is_passed_and_environment_ignored(monkeypatch):
+    import ask_mcp.bot.tg as tg_module
+
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(tg_module.httpx, "AsyncClient", FakeClient)
+    tg_module.TgApi("1:x", proxy="http://user:secret@127.0.0.1:8080")
+    assert captured["proxy"] == "http://user:secret@127.0.0.1:8080"
+    assert captured["trust_env"] is False  # явный прокси сильнее HTTPS_PROXY/NO_PROXY
+
+
+def test_without_proxy_environment_is_used(monkeypatch):
+    import ask_mcp.bot.tg as tg_module
+
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(tg_module.httpx, "AsyncClient", FakeClient)
+    tg_module.TgApi("1:x")
+    assert "proxy" not in captured and "trust_env" not in captured
+
+
+def test_redact_hides_proxy_credentials():
+    from ask_mcp.bot.tg import _redact
+
+    proxy = "http://user:secret@127.0.0.1:8080"
+    out = _redact(f"ProxyError: cannot connect to {proxy}", proxy)
+    assert "secret" not in out and "***@" in out and "127.0.0.1:8080" in out
+    # логин и пароль в незнакомой записи тоже скрываются
+    assert "secret" not in _redact("http://user:secret@proxy:8080", None)
+
+
 def test_network_error_becomes_tg_error_without_token():
     def boom(request):
         raise httpx.ConnectError("нет сети", request=request)

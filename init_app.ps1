@@ -204,6 +204,10 @@ function Test-Environment {
         if ($v -notmatch '^-?\d+(\s*,\s*-?\d+)*$') { 'нужны числовые id через запятую' }
     }
     Check 'Bot' 'TELEGRAM_MCP_URL' $false -DotEnv -Default 'http://127.0.0.1:8000/mcp'
+    Check 'Bot' 'TELEGRAM_PROXY' $false -DotEnv -Default 'без прокси (HTTPS_PROXY/ALL_PROXY из среды)' -Check {
+        param($v)
+        if ($v -notmatch '^(https?|socks5h?)://') { 'нужен адрес http://, https://, socks5:// или socks5h://' }
+    }
     Check 'Bot' 'TELEGRAM_DEFAULT_MODE' $false -DotEnv -Default 'plan' -Check {
         param($v)
         if ('all', 'edits', 'plan' -notcontains $v) { 'допустимо: all, edits, plan' }

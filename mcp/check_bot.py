@@ -8,7 +8,7 @@
 import asyncio
 import sys
 
-from ask_mcp.bot.config import ConfigError, load_config
+from ask_mcp.bot.config import ConfigError, load_config, redact_proxy
 from ask_mcp.bot.mcp_client import McpError, McpWorker
 from ask_mcp.bot.tg import TgApi, TgError
 
@@ -27,9 +27,10 @@ async def main() -> None:
     except ConfigError as e:
         report(False, "настройки", str(e))
         return
-    report(True, "настройки", f"пользователей {len(cfg.allowed_users)}, MCP {cfg.mcp_url}")
+    proxy = redact_proxy(cfg.proxy) if cfg.proxy else "не задан (HTTPS_PROXY/ALL_PROXY из среды, если есть)"
+    report(True, "настройки", f"пользователей {len(cfg.allowed_users)}, MCP {cfg.mcp_url}, прокси {proxy}")
 
-    tg = TgApi(cfg.token, cfg.api_url)
+    tg = TgApi(cfg.token, cfg.api_url, proxy=cfg.proxy)
     try:
         me = await tg.get_me()
         report(True, "токен", f"@{me.get('username')} (id {me.get('id')})")

@@ -7,13 +7,14 @@
 import os
 from dataclasses import dataclass
 from typing import Mapping
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from ..config import load_dotenv  # noqa: F401  (.env рядом с server.py читается при импорте ask_mcp.config)
 
 LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
 MODES = ("all", "edits", "plan")
 LOG_LEVELS = ("debug", "info", "warn", "error")
+PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
 DEFAULT_MCP_URL = "http://127.0.0.1:8000/mcp"
 DEFAULT_API_URL = "https://api.telegram.org"
 
@@ -29,6 +30,7 @@ class BotConfig:
     allowed_chats: frozenset[int]
     mcp_url: str
     api_url: str
+    proxy: str | None
     default_mode: str
     dangerous: bool
     task_timeout: float
@@ -116,6 +118,49 @@ def api_url(env: Mapping[str, str]) -> str:
     return raw
 
 
+def redact_proxy(url: str | None) -> str:
+    """Адрес прокси без логина и пароля: `http://***@host:port`. Пароль не должен попасть в лог."""
+    if not url:
+        return "не задан"
+    parsed = urlparse(url)
+    if "@" not in parsed.netloc:
+        return url
+    return f"{parsed.scheme}://***@{parsed.netloc.rsplit('@', 1)[1]}"
+
+
+def proxy_url(env: Mapping[str, str]) -> str | None:
+    """TELEGRAM_PROXY: http, https, socks5 или socks5h. Не задан — None (httpx берёт HTTPS_PROXY/ALL_PROXY).
+
+    Логин и пароль можно держать отдельно: TELEGRAM_PROXY_USERNAME и TELEGRAM_PROXY_PASSWORD.
+    Они подставляются в адрес с экранированием, чтобы спецсимволы не ломали URL.
+    """
+    raw = _raw(env, "TELEGRAM_PROXY")
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme not in PROXY_SCHEMES or not parsed.hostname:
+        raise ConfigError(
+            "TELEGRAM_PROXY должен быть адресом вида http://127.0.0.1:8080, "
+            f"socks5://127.0.0.1:1080 или socks5h://127.0.0.1:1080, получено: {raw!r}"
+        )
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ConfigError(f"TELEGRAM_PROXY: неверный порт в {redact_proxy(raw)!r}") from None
+
+    user = _raw(env, "TELEGRAM_PROXY_USERNAME")
+    password = _raw(env, "TELEGRAM_PROXY_PASSWORD")
+    if user and not parsed.username:
+        auth = quote(user, safe="")
+        if password:
+            auth += ":" + quote(password, safe="")
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):  # IPv6
+            host = f"[{host}]"
+        raw = f"{parsed.scheme}://{auth}@{host}{f':{port}' if port else ''}"
+    return raw
+
+
 def load_config(env: Mapping[str, str] | None = None) -> BotConfig:
     """Собирает настройки. Ошибка настроек — ConfigError с готовым текстом."""
     env = os.environ if env is None else env
@@ -151,6 +196,7 @@ def load_config(env: Mapping[str, str] | None = None) -> BotConfig:
         allowed_chats=chats,
         mcp_url=mcp_url(env),
         api_url=api_url(env),
+        proxy=proxy_url(env),
         default_mode=mode,
         dangerous=_flag(env, "TELEGRAM_ALLOW_DANGEROUS"),
         task_timeout=_float(env, "TELEGRAM_TASK_TIMEOUT", 900.0, 5.0, 86_400.0),

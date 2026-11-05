@@ -30,7 +30,8 @@ async def _connect(url: str, http_timeout: float, sse_read_timeout: float):
     """Потоки (read, write) транспорта Streamable HTTP: новый вход, иначе прежний."""
     if _new_transport is not None:
         client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=http_timeout, read=sse_read_timeout, write=60.0, pool=http_timeout)
+            timeout=httpx.Timeout(connect=http_timeout, read=sse_read_timeout, write=60.0, pool=http_timeout),
+            trust_env=False,  # MCP-сервер локальный: HTTPS_PROXY из среды не должен его ломать
         )
         async with client:
             async with _new_transport(url, http_client=client) as (read, write, _get_id):
