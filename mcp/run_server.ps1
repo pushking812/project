@@ -6,9 +6,15 @@
 #                        both - new tools plus legacy_ask, legacy_get_usage, legacy_code.
 # The API key is NOT stored here: set $env:ASK_API_KEY or put it in .env (legacy backend only)
 
-param([int]$Port = 0)
+# Part: all (default, one server with every tool) | main (without office, vba, browser; port 8000)
+#       | office (only office, vba, browser; name ask-extra; port 8001). Start both in two windows: .\run_servers.ps1
+param([int]$Port = 0, [ValidateSet('all','main','office')][string]$Part = 'all')
 
 Set-Location -LiteralPath $PSScriptRoot
+
+if ($Part -eq 'main')   { $env:MCP_NAME = 'ask';       $env:MCP_SKIP_GROUPS = 'office,vba,browser'; Remove-Item Env:MCP_GROUPS -ErrorAction SilentlyContinue }
+if ($Part -eq 'office') { $env:MCP_NAME = 'ask-extra'; $env:MCP_GROUPS = 'office,vba,browser';      Remove-Item Env:MCP_SKIP_GROUPS -ErrorAction SilentlyContinue
+                          if ($Port -le 0) { $Port = 8001 } }
 
 if (-not $env:MCP_BACKEND)    { $env:MCP_BACKEND = 'api' }
 if (-not $env:ASK_LOCAL_URL)  { $env:ASK_LOCAL_URL = 'http://127.0.0.1:8737' }
@@ -21,6 +27,7 @@ if ($Port -gt 0)              { $env:ASK_PORT = "$Port" }
 Write-Host "Backend: $env:MCP_BACKEND"
 if ($env:MCP_BACKEND -eq 'api') { Write-Host "API URL: $env:ASK_LOCAL_URL (ask-code-server must be running)" }
 else                            { Write-Host "Ask site: $env:ASK_BASE_URL" }
+Write-Host "Part:    $Part (name: $(if ($env:MCP_NAME) { $env:MCP_NAME } else { 'ask' }))"
 Write-Host "Server:  http://$($env:ASK_HOST):$($env:ASK_PORT)/mcp"
 
 if ($env:MCP_BACKEND -ne 'api' -and -not $env:ASK_API_KEY -and -not (Test-Path -LiteralPath '.env')) {

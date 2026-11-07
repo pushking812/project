@@ -66,8 +66,8 @@ def test_catalog_slims_schema_and_can_be_switched_off(monkeypatch):
 
 
 def test_ask_office_goes_right_after_ask():
-    text, _, _ = openai_proxy._tools_catalog([_tool("other__x"), _tool("ask-office__edit_word"), _tool("ask__ask")])
-    assert text.index("ask__ask") < text.index("ask-office__edit_word") < text.index("other__x")
+    text, _, _ = openai_proxy._tools_catalog([_tool("other__x"), _tool("ask-extra__browser_open"), _tool("ask__ask")])
+    assert text.index("ask__ask") < text.index("ask-extra__browser_open") < text.index("other__x")
 
 
 def test_groups_parse_and_split():

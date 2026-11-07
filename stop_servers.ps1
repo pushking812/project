@@ -3,7 +3,7 @@
 # через "cmd /c ... & exit 0", завершаются с кодом 0, и вкладки закрываются сами.
 $ErrorActionPreference = 'SilentlyContinue'
 $projectMarker = 'code-ask-api'
-$ports = 8737, 8000, 8789   # ASK HTTP, MCP, OpenAI Proxy
+$ports = 8737, 8000, 8001, 8789   # ASK HTTP, MCP (ask), MCP (ask-extra), OpenAI Proxy
 
 function Stop-Tree {
     param([int]$ProcessId)

@@ -266,10 +266,10 @@ def test_input_limits_truncate_and_flag(monkeypatch, capsys):
     big = [{"role": "user", "content": "q"},
            {"role": "assistant", "content": None, "tool_calls": [
                {"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
-           {"role": "tool", "tool_call_id": "c1", "content": "y" * 9_000}]
+           {"role": "tool", "tool_call_id": "c1", "content": "y" * (openai_proxy.LIMIT_TOOL_RESULT + 1_000)}]
     chat({"messages": big, "tools": TOOLS})
     prompt = asks(seen)[1]["prompt"]
-    assert openai_proxy.CUT in prompt and "y" * 8_000 not in prompt
+    assert openai_proxy.CUT in prompt and "y" * openai_proxy.LIMIT_TOOL_RESULT not in prompt
     assert log_lines(capsys)[-1]["truncated"] is True
 
 

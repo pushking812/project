@@ -101,8 +101,11 @@ if __name__ == "__main__":
             print(e, file=sys.stderr)
             raise SystemExit(2)
     if _ARGS.http:
-        print(f"ask MCP server (http) http://{mcp.settings.host}:{mcp.settings.port}/mcp, backend {BACKEND}, {where}",
-              file=sys.stderr)
+        _only = (os.environ.get("MCP_GROUPS") or "").strip()
+        _skip = (os.environ.get("MCP_SKIP_GROUPS") or "").strip()
+        _groups = f", groups: {_only}" if _only else (f", without: {_skip}" if _skip else ", all groups")
+        print(f"{mcp.name} MCP server (http) http://{mcp.settings.host}:{mcp.settings.port}/mcp, "
+              f"backend {BACKEND}, {where}{_groups}", file=sys.stderr)
         mcp.run(transport="streamable-http")
     else:
         print(f"ask MCP server (stdio), backend {BACKEND}, {where}", file=sys.stderr)

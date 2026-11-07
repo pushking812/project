@@ -5,7 +5,8 @@
 
 Переменные: PROXY_TOKEN (обязателен, не равен ASK_API_KEY), PROXY_HOST (127.0.0.1),
 PROXY_PORT (8789), PROXY_MODEL (claude-sonnet-5-5), PROXY_TOOLS_BLOCK (знаков в каталоге
-инструментов, 60000; при 25000 отбрасывались инструменты ask__*). Ключ Ask берётся как в server.py
+инструментов, 60000; при 25000 отбрасывались инструменты ask__*), PROXY_TOOL_RESULT (знаков
+в одном результате инструмента, 20000). Ключ Ask берётся как в server.py
 (ASK_API_KEY или .env).
 """
 
@@ -36,7 +37,7 @@ DEFAULT_MODEL = "claude-sonnet-5-5"
 LIMIT_SYSTEM = 20_000
 LIMIT_HISTORY = 400
 LIMIT_PROMPT = 100_000
-LIMIT_TOOL_RESULT = 8_000
+LIMIT_TOOL_RESULT = int(os.environ.get("PROXY_TOOL_RESULT", "").strip() or 20_000)
 LIMIT_TOOLS_BLOCK = int(os.environ.get("PROXY_TOOLS_BLOCK", "").strip() or 60_000)
 # Крупнейшая живая схема родного инструмента — read_files, 1 475 знаков; плюс имя, разделители
 # и 400 знаков описания ≈ 1 900. 2 200 берёт её целиком с запасом.
@@ -296,14 +297,14 @@ def _tools_catalog(tools: list[dict]) -> tuple[str, int, list[str]]:
     """
     defs = _tool_defs(tools)
     # Серверы, чьи инструменты в каталог не попадают: подстрока в части имени до «__» (cadcraft, wordcraft…).
-    skip = tuple(p.strip().lower() for p in os.environ.get("PROXY_TOOL_EXCLUDE", "craft").split(",") if p.strip())
+    skip = tuple(p.strip().lower() for p in os.environ.get("PROXY_TOOL_EXCLUDE", "craft,=composio_,=team_").split(",") if p.strip())
     all_defs = defs
     if skip:
         defs = [d for d in defs if not _excluded(d[0], skip)]
     _dump_names(all_defs, [d[0] for d in all_defs if d not in defs])
     if os.environ.get("PROXY_SLIM_SCHEMA", "on").strip().lower() != "off":
         defs = [(n, d, _slim(p)) for n, d, p in defs]
-    first = tuple(p.strip() for p in os.environ.get("PROXY_TOOL_FIRST", "ask__,ask-office__").split(",") if p.strip())
+    first = tuple(p.strip() for p in os.environ.get("PROXY_TOOL_FIRST", "ask__,ask-extra__,ask-office__").split(",") if p.strip())
     mcp = [d for d in defs if "__" in d[0]]
     defs = ([d for d in defs if "__" not in d[0]]
             + sorted((d for d in mcp if d[0].startswith(first)),   # MCP-сервер ask — перед остальными MCP

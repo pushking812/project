@@ -51,8 +51,11 @@ Write-Host 'Запуск серверов:' -ForegroundColor Cyan
 wt -w 0 new-tab -p 'Windows PowerShell' -d $currentDir --title 'NPM Server' cmd /c 'npm start & exit 0'
 Show-ServerStatus 'Сервер ASK HTTP' 'http://127.0.0.1:8737/health' $false
 
-wt -w 0 new-tab -p 'Windows PowerShell' -d $mcpDir --title 'MCP Server' cmd /c 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run_server.ps1 & exit 0'
-Show-ServerStatus 'Сервер MCP' 'http://127.0.0.1:8000/mcp' $true
+wt -w 0 new-tab -p 'Windows PowerShell' -d $mcpDir --title 'MCP Server' cmd /c 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run_server.ps1 -Part main & exit 0'
+Show-ServerStatus 'Сервер MCP (ask)' 'http://127.0.0.1:8000/mcp' $true
+
+wt -w 0 new-tab -p 'Windows PowerShell' -d $mcpDir --title 'MCP ask-extra' cmd /c 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run_server.ps1 -Part office & exit 0'
+Show-ServerStatus 'Сервер MCP (ask-extra)' 'http://127.0.0.1:8001/mcp' $true
 
 wt -w 0 new-tab -p 'Windows PowerShell' -d $mcpDir --title 'OpenAI Proxy' cmd /c '.\.venv\Scripts\python.exe openai_proxy.py & exit 0'
 Show-ServerStatus 'Сервер OpenAI Proxy' 'http://127.0.0.1:8789/healthz' $false
@@ -71,4 +74,5 @@ if ($botInEnv -or $botInFile) {
     Write-Host '[--] TELEGRAM_BOT_TOKEN не задан: см. docs/telegram-bot.md' -ForegroundColor DarkGray
 }
 
+Write-Host 'Порты: ASK 8737, MCP ask 8000, MCP ask-extra 8001, OpenAI Proxy 8789' -ForegroundColor Cyan
 Write-Host 'Все процессы запущены!' -ForegroundColor Green
