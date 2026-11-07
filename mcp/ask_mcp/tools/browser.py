@@ -58,24 +58,19 @@ async def browser_open(
     headless: bool | None = None,
     captcha: Captcha | None = None,
 ):
-    """Открыть страницу (action open). Первый вызов запускает окно браузера.
+    """Открыть страницу (action open); первый вызов запускает окно браузера.
 
-    url: адрес; example.com дополняется до https://, localhost и 127.0.0.1 — до http://.
-    mode: all — любые сайты; edits и plan — только localhost, файлы проекта и хосты из allowed_sites.
-    headless: false — видимое окно (на той же странице), true — снова скрыть. Выбор действует дальше.
-    captcha: handoff — если капча мешает, сервер сам покажет окно и позовёт человека (ответ придёт после его действий).
-    Возвращает output, снимок страницы, captcha и handoff_needed.
+    url: example.com дополняется до https://, localhost — до http://.
+    mode: all — любые сайты; edits и plan — localhost, файлы проекта и allowed_sites.
+    headless: false — видимое окно. captcha: handoff — при капче позвать человека и ждать.
+    Возвращает output, снимок, captcha, handoff_needed.
     """
     return await _act("open", url=url, mode=mode, allowedSites=allowed_sites, headless=headless, captcha=captcha,
                       read_timeout=600.0 if captcha == "handoff" else 60.0)
 
 
 async def browser_read(headless: bool | None = None, captcha: Captcha | None = None):
-    """Прочитать страницу текстом (action read): адрес, заголовок, видимый текст, ссылки, поля и кнопки.
-
-    Дешевле снимка. Оттуда берут значения для selector в browser_click и browser_type.
-    Если на странице капча, в ответе появится captcha и handoff_needed.
-    """
+    """Страница текстом (action read): адрес, заголовок, текст, ссылки, поля, кнопки. Дешевле снимка; отсюда selector для click и type."""
     return await _act("read", headless=headless, captcha=captcha,
                       read_timeout=600.0 if captcha == "handoff" else 60.0)
 
@@ -92,10 +87,7 @@ async def browser_click(
     mode: Mode | None = None,
     allowed_sites: list[str] | None = None,
 ):
-    """Нажать (action click): selector — CSS (#buy) или text=Слова на элементе; либо координаты x и y со снимка.
-
-    Нет элемента — 404. Клик, уводящий на сайт вне allowed_sites (при mode не all), откатывается и даёт 403.
-    """
+    """Нажать (action click): selector — CSS (#buy) или text=Слова; либо x и y со снимка. Нет элемента — 404, чужой сайт — 403."""
     return await _act("click", selector=selector, x=x, y=y, mode=mode, allowedSites=allowed_sites)
 
 
@@ -144,12 +136,10 @@ async def browser_state() -> str:
 
 
 async def browser_handoff(text: str | None = None, headless: bool | None = None):
-    """Передать окно человеку (action handoff) и ждать, пока он закончит.
+    """Передать окно человеку (action handoff) и ждать: капча, вход, пароль, SMS-код, согласие.
 
-    Нужна для капчи, входа в аккаунт, пароля, кода из SMS, окна согласия: то, что должен сделать живой человек.
-    text: что сделать (человек видит это в уведомлении). headless: false показывает невидимое окно на той же странице.
-    Вызов не возвращается до конца передачи (до 8 минут): капча решена (how=done), человек сообщил browser_handoff_done
-    (how=said), таймаут или закрытие окна. Пока идёт передача, остальные действия отвечают 409.
+    text: что сделать (видно в уведомлении). Ждёт до 8 минут: how=done, said (browser_handoff_done), таймаут или
+    закрытие окна. Пока идёт передача, остальные действия отвечают 409.
     """
     return await _act("handoff", text=text, headless=headless, read_timeout=600.0)
 

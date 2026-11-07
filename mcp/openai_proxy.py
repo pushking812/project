@@ -222,6 +222,71 @@ def _notes_text() -> str:
     return "Заметки проекта (ASK.md):\n" + text
 
 
+def _slim(schema, _props: bool = False):
+    """Схема параметров без служебного: «title», «default: null», вариант null в anyOf/oneOf.
+
+    Смысл схемы тот же: необязательность задаёт «required», а не null. PROXY_SLIM_SCHEMA=off отключает.
+    """
+    if isinstance(schema, list):
+        return [_slim(x) for x in schema]
+    if not isinstance(schema, dict):
+        return schema
+    if _props:  # словарь «имя свойства -> схема»: имена, даже «title», не трогаем
+        return {k: _slim(v) for k, v in schema.items()}
+    out = {}
+    for k, v in schema.items():
+        if k == "title" and isinstance(v, str):
+            continue
+        if k == "default" and v is None:
+            continue
+        out[k] = _slim(v, _props=(k in ("properties", "$defs", "definitions") and isinstance(v, dict)))
+    for key in ("anyOf", "oneOf"):
+        variants = out.get(key)
+        if isinstance(variants, list):
+            rest = [x for x in variants if not (isinstance(x, dict) and x.get("type") == "null")]
+            if len(rest) == 1 and isinstance(rest[0], dict) and len(rest) < len(variants):
+                del out[key]
+                out = {**rest[0], **out}
+            elif rest and len(rest) < len(variants):
+                out[key] = rest
+    return out
+
+
+def _excluded(name: str, skip: tuple[str, ...]) -> bool:
+    """MCP-имя («сервер__инструмент»): подстрока в имени сервера. Родное имя без «__»: только
+    запись с «=» в начале, как префикс имени (=composio_ убирает composio_search_tools и т. п.)."""
+    if "__" in name:
+        server = name.split("__", 1)[0].lower()
+        return any(s in server for s in skip if not s.startswith("="))
+    return any(name.lower().startswith(s[1:]) for s in skip if s.startswith("=") and len(s) > 1)
+
+
+def _dump_names(defs: list[tuple[str, str, object]], excluded: list[str]) -> None:
+    """Имена и размеры инструментов, которые прислал клиент, — в файл (PROXY_TOOLS_DUMP, по умолчанию
+    tools-seen.txt рядом с прокси; off отключает). Пишется только при смене набора имён."""
+    path = os.environ.get("PROXY_TOOLS_DUMP", "").strip() or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "tools-seen.txt")
+    if path.lower() == "off":
+        return
+    names = tuple(sorted(d[0] for d in defs))
+    if _dump_names.last == names:
+        return
+    _dump_names.last = names
+    rows = []
+    for name, desc, params in sorted(defs, key=lambda d: d[0]):
+        size = len(name) + len(desc[:400]) + len(json.dumps(params, ensure_ascii=False, separators=(",", ":")))
+        rows.append(f"{size:6d}  {name}" + ("   [исключён]" if name in excluded else ""))
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"# {datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}: {len(defs)} инструментов от клиента, "
+                    "размер = имя + описание + схема (знаков)\n" + "\n".join(rows) + "\n")
+    except OSError:
+        pass
+
+
+_dump_names.last = None
+
+
 def _tools_catalog(tools: list[dict]) -> tuple[str, int, list[str]]:
     """Каталог инструментов для начала prompt -> (текст, сколько вошло, имена отброшенных).
 
@@ -232,12 +297,17 @@ def _tools_catalog(tools: list[dict]) -> tuple[str, int, list[str]]:
     defs = _tool_defs(tools)
     # Серверы, чьи инструменты в каталог не попадают: подстрока в части имени до «__» (cadcraft, wordcraft…).
     skip = tuple(p.strip().lower() for p in os.environ.get("PROXY_TOOL_EXCLUDE", "craft").split(",") if p.strip())
+    all_defs = defs
     if skip:
-        defs = [d for d in defs if "__" not in d[0] or not any(s in d[0].split("__", 1)[0].lower() for s in skip)]
-    first = tuple(p.strip() for p in os.environ.get("PROXY_TOOL_FIRST", "ask__").split(",") if p.strip())
+        defs = [d for d in defs if not _excluded(d[0], skip)]
+    _dump_names(all_defs, [d[0] for d in all_defs if d not in defs])
+    if os.environ.get("PROXY_SLIM_SCHEMA", "on").strip().lower() != "off":
+        defs = [(n, d, _slim(p)) for n, d, p in defs]
+    first = tuple(p.strip() for p in os.environ.get("PROXY_TOOL_FIRST", "ask__,ask-office__").split(",") if p.strip())
     mcp = [d for d in defs if "__" in d[0]]
     defs = ([d for d in defs if "__" not in d[0]]
-            + [d for d in mcp if d[0].startswith(first)]   # MCP-сервер ask — перед остальными MCP
+            + sorted((d for d in mcp if d[0].startswith(first)),   # MCP-сервер ask — перед остальными MCP
+                     key=lambda d: next(i for i, p in enumerate(first) if d[0].startswith(p)))
             + [d for d in mcp if not d[0].startswith(first)])
     lines = [TOOLS_HEADER]
     used = len(TOOLS_HEADER)
@@ -339,7 +409,8 @@ def _build(messages: list, tools: list[dict] | None, model: str) -> tuple[dict, 
         body["system"] = system
     info = {"sent": sent, "dropped": len(dropped), "dropped_names": dropped[:5],
             "system_chars": len(system), "system_cut": bool(spill),
-            "spill_chars": len(spill), "prompt_cut": omitted or tool_cut}
+            "spill_chars": len(spill), "prompt_cut": omitted or tool_cut,
+            "catalog_chars": len(catalog), "history_chars": total}
     return body, truncated, info
 
 
@@ -445,8 +516,12 @@ async def _stop_run(run_id: str | None) -> None:
 async def models(request: Request):
     if not _authorized(request):
         return _denied()
-    data = [{"id": n, "object": "model", "created": 0, "owned_by": "ask-api"} for n in MODELS]
-    data.append({"id": "ask", "object": "model", "created": 0, "owned_by": "ask"})
+    # ~3 знака на токен: LIMIT_PROMPT знаков -> окно в токенах (клиенты читают context_length)
+    ctx = LIMIT_PROMPT // 3
+    data = [{"id": n, "object": "model", "created": 0, "owned_by": "ask-api",
+             "context_length": ctx, "max_context": ctx} for n in MODELS]
+    data.append({"id": "ask", "object": "model", "created": 0, "owned_by": "ask",
+                 "context_length": ctx, "max_context": ctx})
     return JSONResponse({"object": "list", "data": data})
 
 
@@ -500,6 +575,7 @@ async def chat(request: Request):
     log["tools_dropped_names"] = tinfo["dropped_names"]
     log["system_chars"], log["system_cut"] = tinfo["system_chars"], tinfo["system_cut"]
     log["spill_chars"], log["prompt_cut"] = tinfo["spill_chars"], tinfo["prompt_cut"]
+    log["catalog_chars"], log["history_chars"] = tinfo["catalog_chars"], tinfo["history_chars"]
     state = _State()
     ids = _Ids(model)
 

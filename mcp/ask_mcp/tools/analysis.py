@@ -31,15 +31,10 @@ def _prompt(kind: str, **kw) -> str:
 
 
 async def analyze(path: str, prompt: str, mode: Literal["read", "write"] = "read") -> str:
-    """Разобрать файл по вопросу: сервер сам читает его (текст, PDF, картинка, .docx, .xlsx) и прикладывает к запросу.
+    """Разобрать файл по вопросу: сервер сам читает его (текст, PDF, картинка, .docx, .xlsx).
 
-    path: путь файла в папке проекта, лучше относительный (например, `hello.xlsx`). Полный путь внутри папки
-          проекта тоже подойдёт, путь вне папки — отказ 403.
-    prompt: что нужно узнать или сделать.
-    mode: read — ответ без действий (POST /ask, быстро); write — задача агента (POST /execute, режим all):
-          он может создать или изменить файлы.
-    Возвращает JSON: при read — text и usage; при write — answer и output_files (поля нет, если файлов не записано).
-    Расходует лимит тарифа.
+    path: файл в папке проекта (вне неё — 403). mode: read — только ответ (/ask); write — агент может менять файлы (/execute).
+    Возвращает JSON: text и usage (read) или answer и output_files (write). Расходует лимит тарифа.
     """
     if mode not in ("read", "write"):
         raise AskError(f"mode должен быть read или write, получено: {mode!r}")

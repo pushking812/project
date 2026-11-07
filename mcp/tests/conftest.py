@@ -9,6 +9,12 @@ def _no_project_notes(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_tools_dump(monkeypatch):
+    # Прокси пишет список инструментов клиента в файл; тесты его не создают (свой путь задаёт сам тест).
+    monkeypatch.setenv("PROXY_TOOLS_DUMP", "off")
+
+
+@pytest.fixture(autouse=True)
 def _no_autosession(monkeypatch, tmp_path):
     # Автосессия по умолчанию выключена и не трогает настоящий файл пользователя; тесты автосессии включают её сами.
     from ask_mcp import autosession

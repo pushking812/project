@@ -62,13 +62,22 @@ _load_dotenv = _config.load_dotenv
 _ARGS = _cli(sys.argv[1:]) if __name__ == "__main__" else _cli(["--http"] if "--http" in sys.argv else [])
 _HOST, _PORT = _bind_settings(_ARGS.host, _ARGS.port) if _ARGS.http else ("127.0.0.1", 8000)
 
-mcp = FastMCP("ask", host=_HOST, port=_PORT)
+import os  # noqa: E402
+
+# Разделение каталога на несколько серверов (необязательно): MCP_NAME — имя сервера (по умолчанию ask),
+# MCP_GROUPS — только эти группы (office,vba), MCP_SKIP_GROUPS — все, кроме этих. Группы: ask_mcp/tools/__init__.py.
+mcp = FastMCP(os.environ.get("MCP_NAME", "").strip() or "ask", host=_HOST, port=_PORT)
 
 
 def register_tools(server: FastMCP, backend: str) -> None:
     """Подключает инструменты выбранного бэкенда."""
     if backend in ("api", "both"):
-        _tools.register(server)
+        try:
+            _tools.register(server, _tools.parse_groups(os.environ.get("MCP_GROUPS")),
+                            _tools.parse_groups(os.environ.get("MCP_SKIP_GROUPS")))
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            raise SystemExit(2)
     if backend == "legacy":
         _legacy.register(server)
     elif backend == "both":

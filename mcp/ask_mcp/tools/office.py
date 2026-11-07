@@ -135,10 +135,9 @@ def _plain(v: Any) -> Any:
 
 def read_excel(path: str, sheet: str | None = None, cell_range: str | None = None,
                max_rows: int = 200, values_only: bool = False) -> str:
-    """Прочитать книгу Excel (.xlsx или .xlsm). Без sheet — первый лист; список всех листов возвращается всегда.
+    """Прочитать книгу Excel (.xlsx, .xlsm). Без sheet — первый лист; список листов приходит всегда.
 
-    cell_range: например "A1:D20" (по умолчанию весь занятый диапазон). max_rows: лимит строк.
-    Формулы возвращаются текстом ("=SUM(A1:A3)"); values_only=true — вычисленные значения, сохранённые Excel.
+    cell_range: "A1:D20" (по умолчанию весь диапазон). Формулы — текстом; values_only=true — сохранённые значения.
     """
     try:
         openpyxl = _need("openpyxl", "openpyxl")
@@ -167,11 +166,10 @@ def read_excel(path: str, sheet: str | None = None, cell_range: str | None = Non
 
 def write_excel(path: str, cells: dict[str, Any] | None = None, rows: list[list[Any]] | None = None,
                 sheet: str | None = None, start_cell: str = "A1", create_sheet: bool = True) -> str:
-    """Создать или изменить книгу Excel (.xlsx или .xlsm; макросы .xlsm сохраняются). Остальное содержимое файла сохраняется.
+    """Создать или изменить книгу Excel (.xlsx, .xlsm; остальное содержимое и макросы сохраняются).
 
-    cells: {"B2": 10, "C2": "=B2*2"} — значения по адресам; строка с "=" в начале становится формулой.
-    rows: список строк, пишется блоком от start_cell. sheet: имя листа (по умолчанию первый или новый "Sheet").
-    create_sheet: создать лист, если его нет.
+    cells: {"B2": 10, "C2": "=B2*2"}; строка с "=" — формула. rows: блок строк от start_cell.
+    sheet: имя листа (по умолчанию первый); create_sheet: создать, если нет.
     """
     try:
         openpyxl = _need("openpyxl", "openpyxl")
@@ -269,13 +267,11 @@ def read_word(path: str, max_paragraphs: int = 500) -> str:
 def edit_word(path: str, replacements: list[dict[str, str]] | None = None,
               append_paragraphs: list[str] | None = None, insert_after: int | None = None,
               heading_level: int | None = None, table_rows: list[list[str]] | None = None) -> str:
-    """Изменить документ Word (.docx или .docm; макросы .docm сохраняются) или создать .docx.
+    """Изменить документ Word (.docx, .docm; макросы сохраняются) или создать .docx.
 
-    replacements: [{"old": "...", "new": "..."}] — замена текста в абзацах, таблицах, колонтитулах.
-    append_paragraphs: новые абзацы в конец, либо после абзаца с номером insert_after (номер из read_word).
-    heading_level: 1–9 — оформить добавляемые абзацы как заголовки.
-    table_rows: добавить таблицу в конец документа (список строк из ячеек).
-    Файла нет — создаётся новый .docx (новый .docm создайте через Word или write_vba).
+    replacements: [{"old","new"}] — замена в тексте, таблицах, колонтитулах.
+    append_paragraphs: абзацы в конец или после абзаца insert_after (номер из read_word); heading_level 1–9 — заголовки.
+    table_rows: таблица в конец (строки ячеек).
     """
     try:
         docx = _need("docx", "python-docx")
