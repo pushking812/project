@@ -1,15 +1,4 @@
 {
   "servers": {
-    "ask": {
-      "type": "stdio",
-      "command": "${workspaceFolder}/mcp/.venv/Scripts/python.exe",
-      "args": [
-        "${workspaceFolder}/mcp/server.py"
-      ],
-      "env": {
-        "MCP_BACKEND": "api",
-        "ASK_LOCAL_URL": "http://127.0.0.1:8737"
-      }
-    }
   }
 }

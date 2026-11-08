@@ -1,0 +1,41 @@
+    `STAMP_CELLS` задаёт пары (строка, столбец); в таблицу передаётся
+    строка и столбец именно в таком порядке. `Лист` и `Листов` ищутся
+    отдельно: в бланках они делят строку с подписями граф изменений.
+    Пустая графа `Изм.` — это ноль: в бланках без выпущенных изменений
+    строка значений не заполняется.
+    """
+    values: dict[str, str] = {}
+    for code in STAMP_CELLS:
+        values[code] = anchored_cell(rows, row_number, column_number)
+    values[LABEL_SHEET], values[LABEL_SHEETS] = read_sheet_values(rows)
+    values[LABEL_DOC_CODE] = find_doc_code(rows)
+    values[LABEL_REVISION] = _revision_value(values.get(LABEL_REVISION, ""))
+    revision = anchored_cell(rows, *STAMP_CELLS[LABEL_REVISION])
+    values[LABEL_REVISION] = _revision_value(revision) if revision else "0"
+    return values
+*run_commands(cd C:\Users\user\Desktop\workai; $env:PYTHONIOENCODING='utf-8'; python _vor_run.py 2>&1 | Out-File -Encoding utf8 _vor_run.txt; Get-Content _vor_run.txt -Encoding UTF8 && cd C:\Users\user\Desktop\workai; $env:PYTHONIOENCODING='utf-8'; python -m pytest tests -q 2>&1 | Select-Object -Last 6)
+⎿ files: 49
+
+   ... 52 more lines
+*Осталcя один сбой (Р-2-АПТ → Разработал). Посмотрю его бланк.
+*run_commands(cd C:\Users\user\Desktop\workai; Remove-Item -Force _vor_probe.py -ErrorAction SilentlyContinue; Write-Output ok)
+⎿ ok
+*editor(C:\Users\user\Desktop\workai\_vor_probe.py)
+⎿ +12 lines (new) | python
+"""Разведка: бланк Р-2-АПТ (Изм. -> Разработал)."""
+import json
+
+from core.parsers.stamp_parser import find_change_label_row, parse_stamp
+
+raw = json.loads(parse_stamp("ВОР/ЕСТ-ПМ-80825-Р-2-АПТ.ВОР 1.02.2023.docx")["stamp_raw"])
+for index, table in enumerate(raw["tables"]):
+    anchor = find_change_label_row(table)
+    print("== table %d rows=%d cols=%d anchor=%d" % (index, len(table), len(table[0]), anchor))
+    for number, row in enumerate(table):
+        print("   r%02d | %s" % (number, " | ".join((cell or "")[:11] for cell in row[:10])))
+
+Thinking... (esc to cancel)
+Ask anything...
+deepseek-v4-flash ██████ (103 908) $0.00
+workai (main) | 7 files +0 -828
+⏵⏵ Auto-approve all enabled (Shift+Tab)

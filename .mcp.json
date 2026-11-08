@@ -1,0 +1,18 @@
+{
+	"mcpServers": {
+		"ask": {
+			"type": "stdio",
+			"command": "C:\\Users\\user\\Desktop\\code-ask-api\\project/mcp/.venv/Scripts/python.exe",
+			"args": [
+				"C:\\Users\\user\\Desktop\\code-ask-api\\project/mcp/server.py"
+			],
+			"tools": [
+				"*"
+			],
+			"env": {
+				"MCP_BACKEND": "api",
+				"ASK_LOCAL_URL": "http://127.0.0.1:8737"
+			}
+		}
+	}
+}
