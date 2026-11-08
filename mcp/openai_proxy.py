@@ -819,8 +819,9 @@ async def _used_now() -> dict | None:
         if r.status_code != 200:
             return None
         lim = (r.json() or {}).get("limits") or {}
-        week = (lim.get("week") or {}).get("used")
-        window = (lim.get("session") or {}).get("used")
+        wins = lim.get("windows") if isinstance(lim.get("windows"), dict) else lim  # сайт: limits.windows.week
+        week = (wins.get("week") or {}).get("used")
+        window = (wins.get("session") or {}).get("used")
         out = {k: float(v) for k, v in (("week", week), ("window", window)) if isinstance(v, (int, float))}
         return out or None
     except (ValueError, httpx.HTTPError):

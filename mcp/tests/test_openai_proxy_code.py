@@ -87,7 +87,7 @@ def test_code_request_logs_used_delta_and_session_total(monkeypatch, capsys):
             return httpx.Response(200, content=TASK)
         if req.url.path == "/me":
             week = next(used)
-            return httpx.Response(200, json={"limits": {"week": {"used": week}, "session": {"used": week / 10}}})
+            return httpx.Response(200, json={"limits": {"kind": "windows", "windows": {"week": {"used": week}, "session": {"used": week / 10}}}})
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
