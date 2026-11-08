@@ -885,6 +885,12 @@ async def _chat_code(request: Request, messages: list, stream: bool, model: str,
         return _error(400, "В сообщениях нет текста пользователя.")
     log["prompt_chars"] = len(body["prompt"])
     log["session"] = body.get("session_id")
+    # Сообщение без <task> — вероятно служебное (напоминание Cline): пишем начало, чтобы узнать точные фразы.
+    last_raw = next((_ENV_BLOCK.sub("", _text(m.get("content"))).strip() for m in reversed(messages)
+                     if isinstance(m, dict) and m.get("role") == "user"), "")
+    if last_raw and not _TASK_TAG.search(last_raw):
+        log["no_task_tag"] = True
+        log["prompt_head"] = " ".join(last_raw.split())[:200]
     await _slots.acquire()
     handed_over = False
     try:

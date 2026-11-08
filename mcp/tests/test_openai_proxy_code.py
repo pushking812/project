@@ -138,3 +138,26 @@ def test_tool_line_shows_main_argument():
     cmd = openai_proxy._code_piece("tool", {"name": "run_command", "input": {"command": "a\n" + "b" * 200}}, s)
     assert "a b" in cmd and len(cmd) < 120
     assert openai_proxy._code_piece("tool", {"name": "other", "input": {"x": 1}}, s).strip() == "▸ other"
+
+
+def log_lines(capsys) -> list[dict]:
+    return [json.loads(ln) for ln in capsys.readouterr().err.splitlines() if ln.startswith("{")]
+
+
+def test_message_without_task_tag_is_logged_with_head(monkeypatch, capsys):
+    monkeypatch.setenv("PROXY_BACKEND", "code")
+    monkeypatch.setenv("PROXY_LOG_FILE", "")
+    install(monkeypatch)
+    post({"messages": [user("[ERROR] Вы не использовали инструмент. " + "x" * 400)]})
+    entry = log_lines(capsys)[-1]
+    assert entry["no_task_tag"] is True
+    assert entry["prompt_head"].startswith("[ERROR] Вы не использовали") and len(entry["prompt_head"]) <= 200
+
+
+def test_normal_task_has_no_prompt_head(monkeypatch, capsys):
+    monkeypatch.setenv("PROXY_BACKEND", "code")
+    monkeypatch.setenv("PROXY_LOG_FILE", "")
+    install(monkeypatch)
+    post({"messages": [user(CLINE_FIRST)]})
+    entry = log_lines(capsys)[-1]
+    assert "prompt_head" not in entry and "no_task_tag" not in entry
