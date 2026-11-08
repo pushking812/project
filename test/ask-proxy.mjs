@@ -1,7 +1,14 @@
 // toHttpError: a network failure keeps its real cause in the 502 message.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toHttpError } from '../lib/ask-proxy.mjs';
+import { toHttpError, withCause } from '../lib/ask-proxy.mjs';
+
+test('withCause: adds the network cause once; plain errors stay as they are', () => {
+  const e = new TypeError('fetch failed', { cause: new Error('connect ECONNREFUSED 127.0.0.1:8790') });
+  assert.equal(withCause(e), 'fetch failed: connect ECONNREFUSED 127.0.0.1:8790');
+  assert.equal(withCause(new Error('x')), 'x');
+  assert.equal(withCause({}), 'failed');
+});
 
 test('toHttpError: no status and a cause gives "ask unreachable: <cause>"', () => {
   const e = new TypeError('fetch failed', { cause: new Error('connect ECONNREFUSED 127.0.0.1:8790') });
