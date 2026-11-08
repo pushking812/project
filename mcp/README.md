@@ -1,7 +1,7 @@
 # Ask MCP server (v1)
 
 MCP-сервер Ask. С версии 2 по умолчанию (`MCP_BACKEND=api`) его инструменты работают через HTTP API нашего сервера
-`ask-code-server` (`http://127.0.0.1:8737`, задачи, файлы, память, сессии, браузер, наблюдения, диагностика, 69 инструментов: 60 через API и 9 локальных Office/VBA).
+`ask-code-server` (`http://127.0.0.1:8737`, задачи, файлы, память, сессии, браузер, наблюдения, диагностика, 77 инструментов: 60 через API, 9 локальных Office/VBA и 8 локальных для рабочего стола: скриншоты экрана и окон, список окон и мониторов).
 Список инструментов, соответствие эндпоинтам и устройство модулей — в [MCP_TOOLS.md](MCP_TOOLS.md). Прежние инструменты
 ниже остались рабочими и включаются `MCP_BACKEND=legacy` (или `both`: тогда они называются `legacy_ask`, `legacy_get_usage`,
 `legacy_code`).
@@ -128,6 +128,7 @@ Cline хранит подключённые MCP-серверы и их пере�
 | `MCP_NAME`, `MCP_GROUPS`, `MCP_SKIP_GROUPS` | серверу: имя и набор групп инструментов (обычно задаёт `run_server.ps1`) | `ask`, все группы |
 | `ASK_SESSION_AUTO`, `ASK_SESSION_ID`, `ASK_SESSION_FILE` | автосессия MCP: выключатель (`0`, `false`, `no`, `off`), заданный id, файл с id | включена; `%APPDATA%\ask-code\mcp-session.json` |
 | `ASK_CODE_ROOT`, `ASK_OFFICE_ROOT`, `ASK_OFFICE_ALLOW_ANY_PATH` | корни legacy-инструментов и Office; `ASK_OFFICE_ALLOW_ANY_PATH=1` снимает ограничение корнем | корень проекта |
+| `ASK_SCREENSHOT_DIR` | папка PNG для инструментов `screenshot_*` (внутри корня проекта) | `<корень>/.ask-screenshots` |
 | `ASK_LANG` | язык подсказок анализа | `ru` (`en`) |
 
 Полный список всех переменных `mcp\.env` с умолчаниями и пояснениями — в [`.env.example`](.env.example). Node-сервер (`npm start`) `.env` не читает: его переменные (`ASK_KEY`, `ASK_ROOT`, `ASK_PORT` и др.) задаются в окне перед запуском, см. `docs/api-stage1.md` и `docs/api-stage3.md`. Пустые значения в `.env` игнорируются.

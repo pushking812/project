@@ -4,5 +4,6 @@ starlette>=1.0,<2
 uvicorn>=0.54,<1
 openpyxl>=3.1,<4
 python-docx>=1.1,<2
+Pillow>=10
 pywin32>=306; sys_platform == "win32"
 socksio>=1.0

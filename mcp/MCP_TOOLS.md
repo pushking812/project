@@ -4,7 +4,7 @@ MCP-сервер (`server.py`) — тонкая обёртка. Бэкенд в�
 
 | Значение | Что подключено | Что нужно |
 |---|---|---|
-| `api` (по умолчанию) | 69 инструментов: 60 вызывают HTTP API нашего сервера `ask-code-server`, 9 (Office и VBA) работают локально | запущенный `npm start` (`ASK_LOCAL_URL`, по умолчанию `http://127.0.0.1:8737`); ключ сайта у самого `ask-code-server` (`ASK_KEY`) |
+| `api` (по умолчанию) | 77 инструментов: 60 вызывают HTTP API нашего сервера `ask-code-server`, 9 (Office и VBA) и 8 (рабочий стол, группа `desktop`) работают локально | запущенный `npm start` (`ASK_LOCAL_URL`, по умолчанию `http://127.0.0.1:8737`); ключ сайта у самого `ask-code-server` (`ASK_KEY`) |
 | `legacy` | прежние `ask`, `get_usage`, `code` (прямые вызовы сайта Ask) | `ASK_API_KEY` (`sk-ask-...`), `ASK_BASE_URL` по желанию |
 | `both` | новые инструменты и прежние под именами `legacy_ask`, `legacy_get_usage`, `legacy_code` | оба набора |
 
@@ -62,6 +62,8 @@ ask_mcp/legacy/code.py     прежний code и его локальные ин
 | | `list_apps`, `stop_app`, `stop_all_apps` | `/apps` |
 | Office (локально, через Python, без нашего API) | `read_excel`, `write_excel`, `read_word`, `edit_word` | работают с файлами внутри `ASK_OFFICE_ROOT` |
 | VBA (локально, Windows + Office) | `list_vba`, `read_vba`, `write_vba`, `edit_vba`, `run_vba` | COM-автоматизация Office, без нашего API |
+| рабочий стол (локально, группа `desktop`, Pillow; окна и мониторы только Windows) | `screenshot_screen(monitor, path, inline, max_width)`, `screenshot_region(x, y, width, height, …)`, `screenshot_active_window`, `screenshot_window(title, hwnd, exact, focus, …)` | PNG в `ASK_SCREENSHOT_DIR` или `<корень>/.ask-screenshots`; `inline=true` прикладывает уменьшенную картинку к ответу |
+| | `list_windows(title_contains, include_hidden)`, `list_monitors`, `get_active_window`, `focus_window(title, hwnd, exact)` | без нашего API; отключить группу: `MCP_SKIP_GROUPS=desktop` |
 | рабочая папка | `get_workspace()` | `GET /workspace` (root, allowedRoots, sessionId) |
 | | `set_workspace(path, mode)` | `POST /workspace` (ошибки: `400 invalid_path`, `403 plan_mode`/`system_path`/`home_forbidden`/`not_allowed`, `404`, `409 tasks_running`) |
 | служебные | `get_context`, `get_status`, `compact`, `list_models`, `set_model`, `doctor`, `report_bug` | `/context`, `/status`, `/compact` (SSE), `/models`, `/model`, `/doctor`, `/bug` |
