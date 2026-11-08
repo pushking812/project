@@ -498,6 +498,8 @@ $s | ConvertTo-Json -Depth 5
 
 Готовые запросы для Postman лежат в `postman/` (коллекция и `curls.txt`). В коллекции `taskId` из `/start` сохраняется
 автоматически, так что сценарии 4 и 5 можно пройти по порядку запросов `/start` → `/status` → `/stop`.
+В коллекции есть и папка «Прокси OpenAI (порт 8789)» для прокси из `mcp/` (переменные `proxyUrl` и `proxyToken`);
+подробности: `docs/postman-runs.md`.
 
 ## Layout
 

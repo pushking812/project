@@ -17,3 +17,6 @@ npm test                 # тесты на заглушке сайта, ключ
 Полное описание API (эндпоинты, настройки, примеры, сценарии, отклонения от ТЗ): **[docs/api-stage1.md](docs/api-stage1.md)**.
 Telegram-бот для управления MCP-сервером с телефона: **[docs/telegram-bot.md](docs/telegram-bot.md)**.
 Справочник этапа 2 с примерами `curl`: **[docs/api-stage2.md](docs/api-stage2.md)**.
+Этап 3 (рабочая папка, `files`, `output_files`): **[docs/api-stage3.md](docs/api-stage3.md)**.
+OpenAI-совместимый прокси для Cline и других клиентов (режимы `ask` и `code`, переменные, логи): **[mcp/README.md](mcp/README.md)**.
+Postman: коллекция и `curls.txt` лежат в `postman/`, готовые прогоны и запуск через Postman CLI описаны в **[docs/postman-runs.md](docs/postman-runs.md)**.

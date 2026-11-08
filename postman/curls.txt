@@ -186,3 +186,30 @@ curl -i -X POST http://127.0.0.1:8737/ask -H "Content-Type: application/json" -d
 curl -i -X POST http://127.0.0.1:8737/ask -H "Content-Type: application/json" -d '{"prompt":"x","files":["../outside.txt"]}'
 curl -i -X POST http://127.0.0.1:8737/ask -H "Content-Type: application/json" -d '{"prompt":"x","files":["no-such-file.txt"]}'
 curl -i -X POST http://127.0.0.1:8737/ask -H "Content-Type: application/json" -d '{"prompt":"x","files":["a","b","c","d","e","f"]}'
+
+# --- Событие tool в /execute и /start (нужен ASK_KEY) ---
+# В потоке для вызова с путём приходит: event: tool / data: {"name":"write_file","ok":true,"callId":"...","path":"hello.txt"}
+# Содержимого файлов и команд в событии нет. В done.steps лежат краткие записи о действиях ("wrote hello.txt").
+curl -N -X POST http://127.0.0.1:8737/execute -H "Content-Type: application/json" -d '{"prompt":"create tool-demo.txt with the text Hi","mode":"all"}'
+
+# =====================================================================
+# ПРОКСИ OpenAI (mcp/openai_proxy.py, порт 8789). Запуск: start_servers.ps1 из папки project.
+# Токен: PROXY_TOKEN из mcp/.env (не ASK_KEY). В файл токен не записывайте: PowerShell $env:PROXY_TOKEN, bash export PROXY_TOKEN=...
+# =====================================================================
+
+# без токена
+curl -s http://127.0.0.1:8789/healthz
+# 401 invalid_api_key: нет токена
+curl -i http://127.0.0.1:8789/v1/models
+# список моделей (context_length = LIMIT_PROMPT / 3)
+curl -s http://127.0.0.1:8789/v1/models -H "Authorization: Bearer $PROXY_TOKEN"
+# лимиты аккаунта, лимит не тратится
+curl -s http://127.0.0.1:8789/v1/usage -H "Authorization: Bearer $PROXY_TOKEN"
+# 400: нет messages
+curl -i -X POST http://127.0.0.1:8789/v1/chat/completions -H "Authorization: Bearer $PROXY_TOKEN" -H "Content-Type: application/json" -d '{"model":"ask"}'
+# ответ целиком (тратит один запрос аккаунта)
+curl -s -X POST http://127.0.0.1:8789/v1/chat/completions -H "Authorization: Bearer $PROXY_TOKEN" -H "Content-Type: application/json" -d '{"model":"ask","stream":false,"messages":[{"role":"user","content":"Answer with one word: ok"}]}'
+# поток: строки data: {...} и в конце data: [DONE]
+curl -N -X POST http://127.0.0.1:8789/v1/chat/completions -H "Authorization: Bearer $PROXY_TOKEN" -H "Content-Type: application/json" -d '{"model":"ask","stream":true,"messages":[{"role":"user","content":"Answer with one word: ok"}]}'
+# Windows (PowerShell): curl.exe, токен из $env:PROXY_TOKEN, JSON в двойных кавычках с \"
+# curl.exe -s http://127.0.0.1:8789/v1/models -H "Authorization: Bearer $env:PROXY_TOKEN"

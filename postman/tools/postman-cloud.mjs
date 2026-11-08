@@ -155,7 +155,7 @@ function pick(runs, sel) {
   const s = (sel || 'auto').toLowerCase();
   if (s === 'auto') return runs.filter((r) => r.kind === 'auto' && !r.needsKey);
   if (s === 'keyed') return runs.filter((r) => r.kind === 'auto');
-  if (s === 'manual') return runs.filter((r) => r.kind === 'manual');
+  if (s === 'manual') return runs.filter((r) => r.kind === 'manual' && r.num !== '11'); // Run 11 тратит лимит: только явно (`run 11`)
   const want = s.split(',').map((x) => x.trim().toLowerCase());
   return runs.filter((r) => want.includes(r.num.toLowerCase()));
 }
@@ -229,6 +229,10 @@ async function run(selection, ids) {
     console.warn('Внимание: в выбранных Runs есть шаги с ключом, а ASK_KEY не задан. Эти шаги упадут.');
   }
 
+  if (runs.some((r) => r.num === '11') && !process.env.PROXY_TOKEN) {
+    die('Run 11 (прокси) тратит лимит и требует токен: в PowerShell $env:PROXY_TOKEN="значение_из_mcp\\.env", в cmd set PROXY_TOKEN=значение. Кроме него нужен POSTMAN_API_KEY. Прокси должен быть запущен.');
+  }
+
   const server = isManual ? { stop: async () => {} } : await startServer();
   const results = [];
   try {
@@ -237,6 +241,9 @@ async function run(selection, ids) {
       const a = ['collection', 'run', ids.collectionUid, '-i', r.uid, '-e', ids.environmentUid,
         '--env-var', `baseUrl=${BASE_URL}`, '--env-var', `originalRoot=${path.join(PROJECT, '.postman-root').replace(/\\/g, '/')}`,
         '--delay-request', '50', '--timeout-request', '180000', '--bail', 'failure'];
+      // Run 11 (прокси): токен берём из окружения, в файл коллекции он не попадает
+      if (process.env.PROXY_TOKEN) a.push('--env-var', `proxyToken=${process.env.PROXY_TOKEN}`);
+      if (process.env.PROXY_URL) a.push('--env-var', `proxyUrl=${process.env.PROXY_URL}`);
       if (process.env.RUN_VERBOSE === '1') a.push('--verbose');
       const p = cli(a);
       results.push({ num: r.num, status: p.status });

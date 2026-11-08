@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "ask-code API",
-    "description": "HTTP/SSE API ask-code-server (этапы 1 и 2A-2C). Запустите сервер (npm start) и импортируйте коллекцию. Этап 1: Health, Me, Ask, Execute, Start -> Status -> Stop (taskId сохраняется автоматически). Этап 2: файлы, заметки и память, сессии (sessionId сохраняется после POST /sessions). Запросы /ask, /execute, /start требуют реальный ключ ASK_KEY. Этап 3: рабочая папка (workspace) и files. Перед запросами этапа 3А создайте папку из workspaceDir.\n\nRuns: папки \"Runs · …\" — готовые последовательности для Collection Runner. Запускайте подпапку (Run 01…10) или всю папку \"Runs · автоматические\" по порядку. Подробности: docs/postman-runs.md.",
+    "description": "HTTP/SSE API ask-code-server (этапы 1, 2A-2Е и 3) и OpenAI-совместимый прокси (папка «Прокси OpenAI (порт 8789)»). Запустите сервер (npm start) и импортируйте коллекцию. Этап 1: Health, Me, Ask, Execute, Start -> Status -> Stop (taskId сохраняется автоматически). Этап 2: файлы, заметки и память, сессии (sessionId сохраняется после POST /sessions), браузер, watches и apps, контекст, модели, диагностика. Запросы /ask, /execute, /start требуют реальный ключ ASK_KEY. Этап 3: рабочая папка (workspace) и files. Перед запросами этапа 3А создайте папку из workspaceDir.\n\nПрокси (mcp/openai_proxy.py): запустите start_servers.ps1, в переменной коллекции proxyToken укажите PROXY_TOKEN из mcp/.env (в файл коллекции токен не записывайте). Запрос chat/completions без tools тратит один запрос аккаунта.\n\nRuns: папки \"Runs · …\" — готовые последовательности для Collection Runner. Запускайте подпапку (Run 01…10) или всю папку \"Runs · автоматические\" по порядку. Подробности: docs/postman-runs.md.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -31,6 +31,14 @@
     },
     {
       "key": "pollN",
+      "value": ""
+    },
+    {
+      "key": "proxyUrl",
+      "value": "http://127.0.0.1:8789"
+    },
+    {
+      "key": "proxyToken",
       "value": ""
     }
   ],
@@ -137,7 +145,7 @@
               "raw": "{\n  \"prompt\": \"create hello.txt with the text Hello\",\n  \"mode\": \"all\"\n}"
             },
             "url": "{{baseUrl}}/execute",
-            "description": "Поток: status, delta, tool, usage, done | error. mode: all | edits | plan."
+            "description": "Поток: status, delta, tool, usage, done | error. mode: all | edits | plan. Событие tool: {\"name\",\"ok\",\"callId\",\"path\"}; path есть, только если у вызова был путь (содержимое файлов и команды в событие не попадают). done.steps — краткие записи о действиях на компьютере."
           }
         },
         {
@@ -2577,6 +2585,237 @@
               "raw": "{\n  \"prompt\": \"x\",\n  \"files\": [\n    \".env\"\n  ]\n}"
             },
             "url": "{{baseUrl}}/execute"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Прокси OpenAI (порт 8789)",
+      "description": "OpenAI-совместимый прокси к Ask (порт 8789). Нужны запущенный прокси и proxyToken (PROXY_TOKEN из mcp/.env). Не относится к Runs.",
+      "item": [
+        {
+          "name": "GET /healthz",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('status ok', () => pm.expect(j.status).to.eql('ok'));",
+                  "pm.test('ask_key_set + proxy_token_set', () => { pm.expect(j.ask_key_set).to.eql(true); pm.expect(j.proxy_token_set).to.eql(true); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{proxyUrl}}/healthz",
+            "description": "Без токена. Показывает, заданы ли ASK_API_KEY и PROXY_TOKEN (сами значения не показываются)."
+          }
+        },
+        {
+          "name": "GET /v1/models",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('list', () => { pm.expect(j.object).to.eql('list'); pm.expect(j.data).to.be.an('array').that.is.not.empty; });",
+                  "pm.test('context_length', () => pm.expect(j.data[0].context_length).to.be.a('number'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{proxyToken}}"
+              }
+            ],
+            "url": "{{proxyUrl}}/v1/models",
+            "description": "Список моделей. context_length = LIMIT_PROMPT / 3 (в токенах)."
+          }
+        },
+        {
+          "name": "GET /v1/models - 401 (без токена)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));",
+                  "pm.test('invalid_api_key', () => pm.expect(JSON.stringify(pm.response.json())).to.include('invalid_api_key'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{proxyUrl}}/v1/models"
+          }
+        },
+        {
+          "name": "GET /v1/usage",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{proxyToken}}"
+              }
+            ],
+            "url": "{{proxyUrl}}/v1/usage",
+            "description": "Лимиты аккаунта (проксирует GET /v1/usage сайта). Ответ — объект limits. Запрос не тратит лимит."
+          }
+        },
+        {
+          "name": "POST /v1/chat/completions - 401 (без токена)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"ask\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}"
+            },
+            "url": "{{proxyUrl}}/v1/chat/completions"
+          }
+        },
+        {
+          "name": "POST /v1/chat/completions - 400 (нет messages)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{proxyToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"ask\"\n}"
+            },
+            "url": "{{proxyUrl}}/v1/chat/completions"
+          }
+        },
+        {
+          "name": "POST /v1/chat/completions (без stream)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('есть ответ', () => { pm.expect(j.choices).to.be.an('array').that.is.not.empty; pm.expect(j.choices[0].message.role).to.eql('assistant'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{proxyToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"ask\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Answer with one word: ok\"\n    }\n  ]\n}"
+            },
+            "url": "{{proxyUrl}}/v1/chat/completions",
+            "description": "Тратит один запрос аккаунта. В режиме PROXY_BACKEND=code ответ приходит от задачи /execute и может идти дольше."
+          }
+        },
+        {
+          "name": "POST /v1/chat/completions (stream, SSE)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('[DONE]', () => pm.expect(pm.response.text()).to.include('[DONE]'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{proxyToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"ask\",\n  \"stream\": true,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Answer with one word: ok\"\n    }\n  ]\n}"
+            },
+            "url": "{{proxyUrl}}/v1/chat/completions",
+            "description": "Поток data: {...} и в конце data: [DONE]. Postman покажет поток после завершения ответа. Тратит один запрос аккаунта."
           }
         }
       ]
@@ -5324,6 +5563,237 @@
                 },
                 "url": "{{baseUrl}}/bug",
                 "description": "Отправляет настоящий отчёт на сайт ask."
+              }
+            }
+          ]
+        },
+        {
+          "name": "Run 11 · Прокси (тратит 2 запроса аккаунта; нужен PROXY_TOKEN)",
+          "description": "Ручной Run: вся папка прокси (healthz, models, usage, 401/400 и два запроса chat/completions с ответом; эти два тратят по одному запросу аккаунта). Нужны запущенный прокси и токен: Postman — proxyToken в Current value; postman-cloud.mjs — переменная окружения PROXY_TOKEN. Запуск (PowerShell): $env:POSTMAN_API_KEY=\"...\"; $env:PROXY_TOKEN=\"...\"; node postman\\tools\\postman-cloud.mjs run 11",
+          "item": [
+            {
+              "name": "GET /healthz",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('200', () => pm.response.to.have.status(200));",
+                      "const j = pm.response.json();",
+                      "pm.test('status ok', () => pm.expect(j.status).to.eql('ok'));",
+                      "pm.test('ask_key_set + proxy_token_set', () => { pm.expect(j.ask_key_set).to.eql(true); pm.expect(j.proxy_token_set).to.eql(true); });"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{proxyUrl}}/healthz",
+                "description": "Без токена. Показывает, заданы ли ASK_API_KEY и PROXY_TOKEN (сами значения не показываются)."
+              }
+            },
+            {
+              "name": "GET /v1/models",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('200', () => pm.response.to.have.status(200));",
+                      "const j = pm.response.json();",
+                      "pm.test('list', () => { pm.expect(j.object).to.eql('list'); pm.expect(j.data).to.be.an('array').that.is.not.empty; });",
+                      "pm.test('context_length', () => pm.expect(j.data[0].context_length).to.be.a('number'));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{proxyToken}}"
+                  }
+                ],
+                "url": "{{proxyUrl}}/v1/models",
+                "description": "Список моделей. context_length = LIMIT_PROMPT / 3 (в токенах)."
+              }
+            },
+            {
+              "name": "GET /v1/models - 401 (без токена)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('401', () => pm.response.to.have.status(401));",
+                      "pm.test('invalid_api_key', () => pm.expect(JSON.stringify(pm.response.json())).to.include('invalid_api_key'));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{proxyUrl}}/v1/models"
+              }
+            },
+            {
+              "name": "GET /v1/usage",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('200', () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{proxyToken}}"
+                  }
+                ],
+                "url": "{{proxyUrl}}/v1/usage",
+                "description": "Лимиты аккаунта (проксирует GET /v1/usage сайта). Ответ — объект limits. Запрос не тратит лимит."
+              }
+            },
+            {
+              "name": "POST /v1/chat/completions - 401 (без токена)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('401', () => pm.response.to.have.status(401));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"model\": \"ask\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}"
+                },
+                "url": "{{proxyUrl}}/v1/chat/completions"
+              }
+            },
+            {
+              "name": "POST /v1/chat/completions - 400 (нет messages)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('400', () => pm.response.to.have.status(400));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{proxyToken}}"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"model\": \"ask\"\n}"
+                },
+                "url": "{{proxyUrl}}/v1/chat/completions"
+              }
+            },
+            {
+              "name": "POST /v1/chat/completions (без stream)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('200', () => pm.response.to.have.status(200));",
+                      "const j = pm.response.json();",
+                      "pm.test('есть ответ', () => { pm.expect(j.choices).to.be.an('array').that.is.not.empty; pm.expect(j.choices[0].message.role).to.eql('assistant'); });"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{proxyToken}}"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"model\": \"ask\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Answer with one word: ok\"\n    }\n  ]\n}"
+                },
+                "url": "{{proxyUrl}}/v1/chat/completions",
+                "description": "Тратит один запрос аккаунта. В режиме PROXY_BACKEND=code ответ приходит от задачи /execute и может идти дольше."
+              }
+            },
+            {
+              "name": "POST /v1/chat/completions (stream, SSE)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('200', () => pm.response.to.have.status(200));",
+                      "pm.test('[DONE]', () => pm.expect(pm.response.text()).to.include('[DONE]'));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{proxyToken}}"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"model\": \"ask\",\n  \"stream\": true,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Answer with one word: ok\"\n    }\n  ]\n}"
+                },
+                "url": "{{proxyUrl}}/v1/chat/completions",
+                "description": "Поток data: {...} и в конце data: [DONE]. Postman покажет поток после завершения ответа. Тратит один запрос аккаунта."
               }
             }
           ]
