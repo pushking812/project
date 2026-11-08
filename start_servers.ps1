@@ -65,7 +65,11 @@ $dotEnvPath = Join-Path $mcpDir '.env'
 $botInEnv = [bool]$env:TELEGRAM_BOT_TOKEN
 $botInFile = (Test-Path -LiteralPath $dotEnvPath) -and
     [bool](Select-String -LiteralPath $dotEnvPath -Pattern '^\s*TELEGRAM_BOT_TOKEN\s*=' -Quiet)
-if ($botInEnv -or $botInFile) {
+if ($env:START_BOT -ne '1') {
+    # Временно выключен. Чтобы вернуть: $env:START_BOT = '1' перед запуском.
+    Write-Host 'Telegram Bot  ' -NoNewline
+    Write-Host '[--] отключён (включить: $env:START_BOT = ''1'')' -ForegroundColor DarkGray
+} elseif ($botInEnv -or $botInFile) {
     wt -w 0 new-tab -p 'Windows PowerShell' -d $mcpDir --title 'Telegram Bot' cmd /c 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run_bot.ps1 & exit 0'
     Write-Host 'Telegram Bot  ' -NoNewline
     Write-Host '[OK] вкладка запущена (лог — в ней же)' -ForegroundColor Green

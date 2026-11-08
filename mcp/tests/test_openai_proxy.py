@@ -24,6 +24,41 @@ def env(monkeypatch):
     monkeypatch.setenv("ASK_API_KEY", KEY)
     monkeypatch.setenv("PROXY_TOKEN", TOKEN)
     monkeypatch.delenv("PROXY_MODEL", raising=False)
+    monkeypatch.setenv("PROXY_ACCESS_LOG", "off")  # access-строки не мешают разбору лога запросов
+    monkeypatch.setenv("PROXY_COMPACT_AT", "off")  # сжатие включают только его тесты
+    openai_proxy._FOLDED.clear()
+    openai_proxy._compact_block_until = 0.0
+
+
+def test_access_log_records_denied_and_ok(monkeypatch, capsys):
+    monkeypatch.setenv("PROXY_ACCESS_LOG", "on")
+    install(monkeypatch, raw=reply("ok"))
+    with TestClient(openai_proxy.app) as c:
+        c.post("/v1/chat/completions", json={"messages": msg()}, headers={"Authorization": "Bearer wrong-token"})
+        c.get("/v1/models", headers=AUTH)
+    err = capsys.readouterr().err
+    recs = [json.loads(ln) for ln in err.splitlines() if ln.strip().startswith('{"access"')]
+    assert [(r["path"], r["status"], r["token_ok"]) for r in recs] == [
+        ("/v1/chat/completions", 401, False), ("/v1/models", 200, True)]
+    assert "wrong-token" not in err and TOKEN not in err
+
+
+def test_log_goes_to_file_when_set(monkeypatch, tmp_path, capsys):
+    f = tmp_path / "proxy.log"
+    monkeypatch.setenv("PROXY_ACCESS_LOG", "on")
+    monkeypatch.setenv("PROXY_LOG_FILE", str(f))
+    install(monkeypatch, raw=reply("ok"))
+    with TestClient(openai_proxy.app) as c:
+        c.get("/v1/models", headers=AUTH)
+    text = f.read_text(encoding="utf-8")
+    assert '"access": true' in text and TOKEN not in text
+
+
+def test_access_log_can_be_disabled(monkeypatch, capsys):
+    install(monkeypatch, raw=reply("ok"))
+    with TestClient(openai_proxy.app) as c:
+        c.get("/v1/models", headers=AUTH)
+    assert '"access"' not in capsys.readouterr().err
 
 
 def sse(*events) -> bytes:
@@ -62,6 +97,11 @@ def install(monkeypatch, responder=None, raw: bytes | None = None):
 
 def asks(seen):
     return [json.loads(r.content) for r in seen if r.url.path == "/v1/ask"]
+
+
+def flat(body: dict) -> str:
+    """Весь разговор из тела POST /v1/ask: history (с ролями) и prompt (новейшее сообщение)."""
+    return "\n\n".join([h["text"] for h in body.get("history") or []] + [body["prompt"]])
 
 
 def chat(body: dict, headers: dict | None = None):
@@ -159,10 +199,47 @@ def test_tool_result_transcript(monkeypatch):
     ]
     r = chat({"messages": messages, "tools": TOOLS})
     assert r.status_code == 200
-    prompt = asks(seen)[0]["prompt"]
-    assert "tool read_file:" in prompt
-    assert '{"path": "a.py"}' in prompt
-    assert "print(1)" in prompt
+    body = asks(seen)[0]
+    # разговор идёт в history с настоящими ролями; результат инструмента — новейшее сообщение
+    assert body["history"] == [
+        {"role": "user", "text": "прочитай a.py"},
+        {"role": "assistant", "text": '{"tool": "read_file", "args": {"path": "a.py"}}'}]
+    assert body["prompt"].endswith("Результат инструмента read_file:\nprint(1)")
+    assert "user:" not in flat(body) and "assistant:" not in flat(body)  # меток ролей в тексте нет
+
+
+def test_history_roles_and_protocol_in_system(monkeypatch):
+    seen = install(monkeypatch, raw=reply("ok"))
+    messages = [
+        {"role": "user", "content": "тест"},
+        {"role": "assistant", "content": "Тест получен."},
+        {"role": "user", "content": "запусти терминал"},
+    ]
+    chat({"messages": messages, "tools": TOOLS})
+    body = asks(seen)[0]
+    assert body["history"] == [{"role": "user", "text": "тест"}, {"role": "assistant", "text": "Тест получен."}]
+    assert body["prompt"].endswith("запусти терминал")
+    assert "ЕСТЬ инструменты" in body["system"]
+    assert "ЕСТЬ инструменты" not in body["prompt"]
+
+
+def test_no_history_field_for_single_message(monkeypatch):
+    seen = install(monkeypatch, raw=reply("ok"))
+    chat({"messages": msg()})
+    assert "history" not in asks(seen)[0]
+
+
+def test_call_inside_prose_is_parsed(monkeypatch):
+    install(monkeypatch, raw=reply('Читаю файл.\n{"tool": "read_file", "args": {"path": "a.py"}}\nЖду.'))
+    choice = chat({"messages": msg(), "tools": TOOLS}).json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert json.loads(choice["message"]["tool_calls"][0]["function"]["arguments"]) == {"path": "a.py"}
+
+
+def test_json_without_tool_key_is_prose(monkeypatch):
+    install(monkeypatch, raw=reply('Пример: {"a": 1} и {"x": {"tool": 5}}'))
+    choice = chat({"messages": msg(), "tools": TOOLS}).json()["choices"][0]
+    assert choice["finish_reason"] == "stop" and "tool_calls" not in choice["message"]
 
 
 def test_prose_reply_is_final(monkeypatch, capsys):
@@ -172,6 +249,29 @@ def test_prose_reply_is_final(monkeypatch, capsys):
     assert choice["message"]["content"] == "Ничего вызывать не нужно."
     assert choice["finish_reason"] == "stop"
     assert log_lines(capsys)[-1]["fallback"] is True
+
+
+def test_refusal_is_retried_once(monkeypatch, capsys):
+    answers = [reply("В этом чате у меня нет доступа к файлам и командам."),
+               reply('{"tool": "read_file", "args": {"path": "a.py"}}')]
+    seen = install(monkeypatch, responder=lambda req: httpx.Response(
+        200, content=answers.pop(0), headers={"x-run-id": "run1"}))
+    r = chat({"messages": msg("прочитай a.py"), "tools": TOOLS})
+    choice = r.json()["choices"][0]
+    assert choice["message"]["tool_calls"][0]["function"]["name"] == "read_file"
+    assert len(asks(seen)) == 2
+    second = asks(seen)[1]
+    assert "РАБОТАЮТ" in second["prompt"]
+    # отказ модели — её реплика в history, не часть prompt
+    assert second["history"][-1] == {"role": "assistant", "text": "В этом чате у меня нет доступа к файлам и командам."}
+    assert second["history"][-2]["role"] == "user" and "прочитай a.py" in second["history"][-2]["text"]
+    assert log_lines(capsys)[-1]["fallback_reason"] == "retry_ok"
+
+
+def test_plain_answer_is_not_retried(monkeypatch):
+    seen = install(monkeypatch, raw=reply("Готово, ничего вызывать не нужно."))
+    chat({"messages": msg(), "tools": TOOLS})
+    assert len(asks(seen)) == 1
 
 
 def test_unknown_tool_becomes_final(monkeypatch):
@@ -241,6 +341,120 @@ def test_models_lists_documented_names(monkeypatch):
     assert asks(seen)[-1]["model"] == "claude-opus-5-5"
 
 
+def test_old_tool_results_shrink_and_task_stays(monkeypatch):
+    seen = install(monkeypatch, raw=reply("ok"))
+    messages = [{"role": "user", "content": "ЗАДАЧА-ПЕРВАЯ"}]
+    for i in range(5):
+        messages.append({"role": "assistant", "content": "",
+                         "tool_calls": [{"id": f"c{i}", "function": {"name": "read_files", "arguments": "{}"}}]})
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": f"R{i} " + "z" * 15_000})
+    assert chat({"messages": messages}).status_code == 200
+    body = asks(seen)[0]
+    prompt = flat(body)
+    assert body["history"][0] == {"role": "user", "text": "ЗАДАЧА-ПЕРВАЯ"}
+    for i in range(3):  # старые результаты урезаны
+        assert f"R{i} " in prompt and f"R{i} " + "z" * 2_000 not in prompt
+    for i in (3, 4):  # два последних целиком
+        assert f"R{i} " + "z" * 15_000 in prompt
+
+
+def test_old_call_args_shrink(monkeypatch):
+    seen = install(monkeypatch, raw=reply("ok"))
+    messages = [{"role": "user", "content": "ЗАДАЧА"}]
+    for i in range(4):
+        args = json.dumps({"path": f"f{i}.py", "content": f"C{i} " + "q" * 5_000})
+        messages.append({"role": "assistant", "content": "",
+                         "tool_calls": [{"id": f"c{i}", "function": {"name": "editor", "arguments": args}}]})
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": "ok"})
+    assert chat({"messages": messages}).status_code == 200
+    texts = [h["text"] for h in asks(seen)[0]["history"] if h["role"] == "assistant"]
+    for t in texts[:2]:  # старые вызовы: путь цел, код урезан
+        assert '"path": "f' in t and "q" * 1_000 not in t
+    for t in texts[2:]:  # два последних целиком
+        assert "q" * 5_000 in t
+
+
+def test_folded_summary_is_reused(monkeypatch, capsys):
+    folded = ("folded", {"summary": "РЕЗЮМЕ", "count": 3})
+    first = sse(("status", {"state": "starting", "runId": "run1"}), ("delta", {"text": "ok"}), folded,
+                ("done", {"messageId": "m1"}))
+    answers = [first, reply("ok")]
+    seen = install(monkeypatch, responder=lambda req: httpx.Response(
+        200, content=answers.pop(0), headers={"x-run-id": "run1"}))
+    conv = [{"role": "user", "content": "ЗАДАЧА"}, {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"}, {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "u3"}]
+    chat({"messages": conv})
+    assert log_lines(capsys)[-1]["folded"] == 3
+    chat({"messages": conv + [{"role": "assistant", "content": "a3"}, {"role": "user", "content": "u4"}]})
+    second = asks(seen)[1]
+    assert second["history"][:2] == [{"role": "user", "text": openai_proxy.FOLDED_MARK},
+                                     {"role": "assistant", "text": "РЕЗЮМЕ"}]
+    assert [h["text"] for h in second["history"][2:]] == ["a2", "u3", "a3"]
+    assert log_lines(capsys)[-1]["folded_applied"] == 3
+
+
+def _long_task(rounds=5):
+    messages = [{"role": "user", "content": "ЗАДАЧА"}]
+    for i in range(rounds):
+        messages.append({"role": "assistant", "content": "",
+                         "tool_calls": [{"id": f"c{i}", "function": {"name": "read_files", "arguments": "{}"}}]})
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": f"R{i} " + "z" * 15_000})
+    return messages
+
+
+def test_compact_replaces_old_history_with_summary(monkeypatch, capsys):
+    monkeypatch.setenv("PROXY_COMPACT_AT", "0.1")  # порог 10 000 знаков
+    answers = [reply("СВОДКА"), reply("ok"), reply("ok")]
+    seen = install(monkeypatch, responder=lambda req: httpx.Response(
+        200, content=answers.pop(0), headers={"x-run-id": "run1"}))
+    messages = _long_task()
+    assert chat({"messages": messages}).status_code == 200
+    first, second = asks(seen)
+    assert first["prompt"] == openai_proxy.COMPACT_PROMPT and "system" not in first
+    assert first["history"][0] == {"role": "user", "text": "ЗАДАЧА"}
+    assert second["history"][:2] == [{"role": "user", "text": openai_proxy.FOLDED_MARK},
+                                     {"role": "assistant", "text": "СВОДКА"}]
+    assert "R4 " + "z" * 15_000 in flat(second)  # последние результаты остались целыми
+    assert log_lines(capsys)[-1]["compacted"] >= 2
+    # тот же разговор ещё раз: резюме уже есть, новый запрос за ним не нужен
+    assert chat({"messages": messages}).status_code == 200
+    assert len(asks(seen)) == 3 and asks(seen)[2]["history"][1]["text"] == "СВОДКА"
+
+
+def test_compact_failure_is_not_repeated(monkeypatch, capsys):
+    monkeypatch.setenv("PROXY_COMPACT_AT", "0.1")
+    answers = [reply(""), reply("ok"), reply("ok")]
+    seen = install(monkeypatch, responder=lambda req: httpx.Response(
+        200, content=answers.pop(0), headers={"x-run-id": "run1"}))
+    assert chat({"messages": _long_task()}).status_code == 200
+    assert chat({"messages": _long_task()}).status_code == 200
+    bodies = asks(seen)
+    assert len(bodies) == 3  # сжатие один раз, остальные два — основные запросы
+    assert bodies[1]["prompt"] != openai_proxy.COMPACT_PROMPT
+    assert bodies[1]["history"][1]["text"] != openai_proxy.FOLDED_MARK
+    assert openai_proxy.FOLDED_MARK not in flat(bodies[1])
+
+
+def test_compact_off_and_below_threshold(monkeypatch):
+    seen = install(monkeypatch, raw=reply("ok"))  # PROXY_COMPACT_AT=off из фикстуры
+    assert chat({"messages": _long_task()}).status_code == 200
+    monkeypatch.setenv("PROXY_COMPACT_AT", "0.9")
+    assert chat({"messages": _long_task(3)}).status_code == 200
+    assert len(asks(seen)) == 2
+
+
+def test_folded_chain_counts_original_turns():
+    raw = [{"role": "user" if i % 2 == 0 else "assistant", "text": f"t{i}"} for i in range(10)]
+    openai_proxy._remember_folded(raw, 0, {"summary": "S1", "count": 4})
+    sent, applied = openai_proxy._apply_folded(raw)
+    assert applied == 4 and len(sent) == 2 + 6
+    # сервер свернул отправленное: пару резюме и ещё 2 реплики -> в исходной истории это 4 + 2 = 6
+    assert openai_proxy._remember_folded(raw, applied, {"summary": "S2", "count": 4}) == 6
+    sent2, applied2 = openai_proxy._apply_folded(raw)
+    assert applied2 == 6 and sent2[1]["text"] == "S2" and len(sent2) == 2 + 4
+
+
 def test_input_limits_truncate_and_flag(monkeypatch, capsys):
     seen = install(monkeypatch, raw=reply("ok"))
     messages = [{"role": "system", "content": "S" * 30_000}]
@@ -249,10 +463,10 @@ def test_input_limits_truncate_and_flag(monkeypatch, capsys):
     body = asks(seen)[0]
     assert len(body["system"]) == openai_proxy.LIMIT_SYSTEM
     assert body["system"].endswith(openai_proxy.CUT)
-    assert len(body["prompt"]) <= openai_proxy.LIMIT_PROMPT
-    assert body["prompt"].count("user: msg-") <= openai_proxy.LIMIT_HISTORY
-    assert openai_proxy.OMIT in body["prompt"]
-    assert "msg-0 " not in body["prompt"] and "msg-449 " in body["prompt"]
+    assert len(flat(body)) <= openai_proxy.LIMIT_PROMPT
+    assert len(body["history"]) <= openai_proxy.LIMIT_HISTORY
+    assert openai_proxy.OMIT in flat(body)
+    assert "msg-0 " in flat(body) and "msg-1 " not in flat(body) and "msg-449 " in body["prompt"]
     log = log_lines(capsys)[-1]
     assert log["truncated"] is True
     # хвост system не потерян, а переехал в начало prompt
@@ -268,7 +482,7 @@ def test_input_limits_truncate_and_flag(monkeypatch, capsys):
                {"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
            {"role": "tool", "tool_call_id": "c1", "content": "y" * (openai_proxy.LIMIT_TOOL_RESULT + 1_000)}]
     chat({"messages": big, "tools": TOOLS})
-    prompt = asks(seen)[1]["prompt"]
+    prompt = flat(asks(seen)[1])
     assert openai_proxy.CUT in prompt and "y" * openai_proxy.LIMIT_TOOL_RESULT not in prompt
     assert log_lines(capsys)[-1]["truncated"] is True
 
@@ -362,7 +576,7 @@ def test_big_catalog_goes_to_prompt_and_system_survives(monkeypatch, capsys):
     assert "Доступные инструменты:" not in body["system"]
     for i in range(16):
         assert f"- native_{i} Параметры:" in body["prompt"]
-    assert len(body["prompt"]) <= openai_proxy.LIMIT_PROMPT
+    assert len(flat(body)) <= openai_proxy.LIMIT_PROMPT
     entry = log_lines(capsys)[-1]
     assert entry["tools"] == 200
     assert entry["tools_dropped"] > 0
@@ -507,7 +721,7 @@ def test_rules_survive_system_cut(monkeypatch, capsys):
     assert marker in body["prompt"] and marker not in body["system"]
     assert not body["system"].endswith(openai_proxy.CUT)  # конец — протокол
     assert body["system"].endswith(openai_proxy.TOOLS_PROTOCOL)
-    assert len(body["prompt"]) <= openai_proxy.LIMIT_PROMPT
+    assert len(flat(body)) <= openai_proxy.LIMIT_PROMPT
 
 
 def test_fits_without_spill(monkeypatch, capsys):
@@ -531,8 +745,8 @@ def test_prompt_budget_counts_spill(monkeypatch, capsys):
     body = asks(seen)[0]
     log = log_lines(capsys)[-1]
     assert log["spill_chars"] > 0 and log["prompt_cut"] is True
-    assert len(body["prompt"]) <= openai_proxy.LIMIT_PROMPT
-    assert "msg-399 " in body["prompt"]
+    assert len(flat(body)) <= openai_proxy.LIMIT_PROMPT
+    assert "msg-399 " in flat(body)
 
 
 def test_spill_shrinks_for_big_tools_catalog(monkeypatch, capsys):
@@ -543,9 +757,9 @@ def test_spill_shrinks_for_big_tools_catalog(monkeypatch, capsys):
     assert chat({"messages": messages, "tools": _catalog_tools()}).status_code == 200
     body = asks(seen)[0]
     log = log_lines(capsys)[-1]
-    assert len(body["prompt"]) <= openai_proxy.LIMIT_PROMPT
+    assert len(flat(body)) <= openai_proxy.LIMIT_PROMPT
     assert log["spill_chars"] < openai_proxy.LIMIT_PROMPT // 2
-    assert "msg-399 " in body["prompt"]
+    assert "msg-399 " in flat(body)
 
 
 def test_spill_is_capped(monkeypatch, capsys):
@@ -562,25 +776,12 @@ def test_spill_is_capped(monkeypatch, capsys):
     assert "S" * (openai_proxy.LIMIT_PROMPT // 2) in body["prompt"]
     assert log["spill_chars"] + len(body["system"]) < len(system)
     # при этом контракт цел, а история не выброшена целиком
-    assert len(body["prompt"]) <= openai_proxy.LIMIT_PROMPT
+    assert len(flat(body)) <= openai_proxy.LIMIT_PROMPT
     assert log["system_cut"] is True and log["prompt_cut"] is True
-    assert openai_proxy.OMIT in body["prompt"] and "msg-399 " in body["prompt"]
+    assert openai_proxy.OMIT in flat(body) and "msg-399 " in flat(body)
 
 
-def test_reminder_sits_right_before_the_answer_cue(monkeypatch):
-    seen = install(monkeypatch, raw=reply("ok"))
-    messages = [
-        {"role": "user", "content": "тест"},
-        {"role": "assistant", "content": "Тест получен."},
-        {"role": "user", "content": "запусти терминал"},
-    ]
-    chat({"messages": messages, "tools": TOOLS})
-    prompt = asks(seen)[0]["prompt"]
-    assert prompt.endswith(openai_proxy.TOOLS_REMINDER + "\n\nassistant:")
-    assert prompt.count(openai_proxy.TOOLS_REMINDER) == 1
-
-
-def test_no_reminder_without_tools(monkeypatch):
+def test_no_protocol_without_tools(monkeypatch):
     seen = install(monkeypatch, raw=reply("ok"))
     messages = [
         {"role": "user", "content": "a"},
@@ -588,17 +789,18 @@ def test_no_reminder_without_tools(monkeypatch):
         {"role": "user", "content": "c"},
     ]
     chat({"messages": messages})
-    prompt = asks(seen)[0]["prompt"]
-    assert openai_proxy.TOOLS_REMINDER not in prompt
-    assert prompt.endswith("\n\nassistant:")
+    body = asks(seen)[0]
+    assert "system" not in body and body["prompt"] == "c"
+    assert body["history"] == [{"role": "user", "text": "a"}, {"role": "assistant", "text": "b"}]
 
 
-def test_reminder_fits_prompt_budget(monkeypatch):
+def test_big_history_fits_budget_and_keeps_newest(monkeypatch):
     seen = install(monkeypatch, raw=reply("ok"))
     big = "x" * 60_000
     messages = [{"role": "user", "content": big}, {"role": "assistant", "content": big},
                 {"role": "user", "content": "дальше"}]
     chat({"messages": messages, "tools": TOOLS})
-    prompt = asks(seen)[0]["prompt"]
-    assert len(prompt) <= openai_proxy.LIMIT_PROMPT
-    assert prompt.endswith(openai_proxy.TOOLS_REMINDER + "\n\nassistant:")
+    body = asks(seen)[0]
+    assert len(flat(body)) <= openai_proxy.LIMIT_PROMPT
+    assert body["prompt"].endswith("дальше")
+    assert body["history"][0]["role"] == "user"

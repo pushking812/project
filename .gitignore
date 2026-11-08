@@ -24,3 +24,6 @@ test/test.pq
 test/test.proj
 test/test.query.pq
 mcp/tools-seen.txt 
+
+# перехват обмена ask-code (содержит содержимое папок)
+tap/

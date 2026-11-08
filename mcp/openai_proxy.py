@@ -30,6 +30,9 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from server import BASE_URL, TIMEOUT, AskError, _ask_stream, _headers, _State, get_usage
+from ask_mcp.api_client import error_text as _api_error_text
+from ask_mcp.config import local_api_url as _local_api_url
+from ask_mcp.sse import sse_frames as _api_frames
 
 MODELS = ("claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5")
 DEFAULT_MODEL = "claude-sonnet-5-5"
@@ -42,6 +45,21 @@ LIMIT_TOOLS_BLOCK = int(os.environ.get("PROXY_TOOLS_BLOCK", "").strip() or 60_00
 # Крупнейшая живая схема родного инструмента — read_files, 1 475 знаков; плюс имя, разделители
 # и 400 знаков описания ≈ 1 900. 2 200 берёт её целиком с запасом.
 LIMIT_TOOL_LINE = 2_200
+LIMIT_OLD_TOOL = 400    # старый результат инструмента (не из двух последних) в истории: начало и длина
+LIMIT_OLD_ARG = 300     # старый вызов инструмента: каждая длинная строка в args (код, текст файла)
+FOLDED_MARK = "[Earlier in this conversation, folded into notes]"  # слово в слово, как у сайта
+_FOLDED_KEEP = 32
+# Запрос резюме (как COMPACT_PROMPT оригинального клиента, /compact): без инструментов, до ~700 слов.
+COMPACT_PROMPT = (
+    "Write a summary of this task so far, to carry on from instead of the whole conversation, under these "
+    "headings: Goal (what the person asked for, in their own words where it matters, and every later change "
+    "of mind); Project (stack, structure, how to build, run and test it); Files (each file read, created or "
+    "changed, and what changed in it); Commands and results (errors met and how they were fixed); Decisions "
+    "(and why); Done so far; Still open (and the very next step). Keep exact file paths, names, commands, "
+    "error messages and numbers. Use no tools. Write it in the language of the conversation, compact, at "
+    "most about 700 words, and nothing else.")
+COMPACT_PAUSE = 300.0   # после неудачного сжатия секунд не пробуем снова: каждая попытка тратит вопрос лимита
+LIMIT_PIN = 4_000       # первое сообщение пользователя (задача), всегда в начале истории
 CUT = "[…обрезано]"
 OMIT = "[…ранние сообщения опущены]"
 STOP_WAIT = 2.0
@@ -131,8 +149,20 @@ def _emit(log: dict, state: _State | None, t0: float, status: str) -> None:
         log["limits"] = state.limits
     log["status"] = status
     log["ms"] = int((time.monotonic() - t0) * 1000)
-    sys.stderr.write(json.dumps(log, ensure_ascii=False) + "\n")
+    _write_line(json.dumps(log, ensure_ascii=False))
+
+
+def _write_line(text: str) -> None:
+    """Строка в stderr и, если задан PROXY_LOG_FILE, дописывается в файл (main() задаёт его по умолчанию)."""
+    sys.stderr.write(text + "\n")
     sys.stderr.flush()
+    path = os.environ.get("PROXY_LOG_FILE", "").strip()
+    if path:
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(text + "\n")
+        except OSError as e:
+            sys.stderr.write(f"не удалось записать в {path}: {e}\n")
 
 
 # ---------------------------------------------------------------- вход: сообщения -> запрос к Ask
@@ -188,17 +218,28 @@ if TOOL_POLICY not in _POLICY_TEXT:
     TOOL_POLICY = "ask"
 
 TOOLS_PROTOCOL = (
-    "Вы работаете как агент с инструментами. Чтобы вызвать инструмент, ответьте ТОЛЬКО одним "
+    "В этом сеансе у вас ЕСТЬ инструменты: их каталог стоит в начале последнего сообщения пользователя. "
+    "Вы работаете как агент. Чтобы вызвать инструмент, ответьте ТОЛЬКО одним "
     'JSON-объектом без пояснений: {"tool": "<имя>", "args": {...}}. За один ответ один вызов. '
+    "Результат придёт следующим сообщением («Результат инструмента …»); тогда сразу делайте следующий вызов. "
+    "Не пишите, что инструментов или доступа нет, и не предлагайте пользователю выполнить шаг самому. "
     "Когда задача решена или инструмент не нужен, ответьте обычным текстом."
     + _POLICY_TEXT[TOOL_POLICY]
 )
-TOOLS_REMINDER = (
-    "Напоминание: инструменты из каталога выше тебе доступны. Если для ответа нужно действие, "
-    'ответь ТОЛЬКО одним JSON-объектом {"tool": "<имя>", "args": {...}}; не говори, что инструментов нет.'
-    + (" Выбор инструмента — по правилам из system." if TOOL_POLICY != "off" else "")
-)
 TOOLS_HEADER = "Доступные инструменты:"
+
+# Отказ модели вместо вызова («у меня нет инструментов / доступа»): признак для одного повтора запроса.
+_REFUSAL = re.compile(
+    r"нет (?:у меня )?(?:доступа|инструмент)|не могу (?:открыть|прочитать|вызвать|запустить|выполнить)|"
+    r"инструментов (?:в этом чате )?(?:у меня )?нет|без доступа к (?:файл|команд)|"
+    r"не могу (?:дочитать|продолжить)|вызвать инструменты .{0,30}не могу|дочитать .{0,30}не получится|"
+    r"файл (?:обрывается|оборван)|не видел (?:разбор|остальн|продолжени)|"
+    r"no (?:access|tools)|(?:can't|cannot|unable to) (?:access|call|run|open)", re.I)
+_RETRY_NOTE = (
+    "Ваш предыдущий ответ был ошибкой: инструменты из каталога РАБОТАЮТ, "
+    "доступ к файлам и командам есть. Не отказывайтесь и не пишите, что инструментов нет. "
+    'Ответьте ТОЛЬКО одним JSON-объектом {"tool": "<имя>", "args": {...}} для следующего шага задачи (например, прочитать недостающую часть файла).'
+)
 
 # Заметки проекта (ASK.md) для модели: читаются при каждом запросе, перезапуск после правки не нужен.
 # PROXY_NOTES_FILE — путь к файлу (по умолчанию ASK.md в корне проекта, рядом с папкой mcp);
@@ -331,6 +372,137 @@ def _tools_catalog(tools: list[dict]) -> tuple[str, int, list[str]]:
     return "\n".join(lines), len(lines) - 1, dropped
 
 
+def _old_result(text: str) -> str:
+    """Старый результат инструмента: начало и длина. Файл модель при нужде прочтёт заново
+    (как оригинальный клиент, который хранит в истории строку шагов, а не содержимое)."""
+    if len(text) <= LIMIT_OLD_TOOL:
+        return text
+    return text[:LIMIT_OLD_TOOL] + f"{CUT} (всего {len(text)} знаков; нужно — прочитайте заново)"
+
+
+def _shrink_args(args, limit: int = LIMIT_OLD_ARG):
+    if isinstance(args, str):
+        return _cut(args, limit)
+    if isinstance(args, dict):
+        return {k: _shrink_args(v, limit) for k, v in args.items()}
+    if isinstance(args, list):
+        return [_shrink_args(v, limit) for v in args]
+    return args
+
+
+def _call_text(lead: str, calls: list[tuple], short: bool) -> str:
+    lines = [lead] if lead else []
+    for name, args in calls:
+        lines.append(json.dumps({"tool": name, "args": _shrink_args(args) if short else args},
+                                ensure_ascii=False))
+    return "\n".join(lines)
+
+
+# Резюме, которым сервер свернул начало истории (событие folded): хеш первых n реплик -> (n, резюме).
+# Следующий запрос с тем же началом получает короткую пару вместо n реплик, сервер не сворачивает заново.
+_FOLDED: dict[str, tuple[int, str]] = {}
+
+
+def _prefix_hash(history: list[dict], n: int) -> str:
+    h = hashlib.sha256()
+    for item in history[:n]:
+        h.update(f"{item['role']}\0{item['text']}\0".encode())
+    return h.hexdigest()
+
+
+def _apply_folded(history: list[dict]) -> tuple[list[dict], int]:
+    """-> (history, сколько реплик заменено резюме; 0 — ничего)."""
+    for key, (n, summary) in reversed(list(_FOLDED.items())):
+        if len(history) >= n and _prefix_hash(history, n) == key:
+            pair = [{"role": "user", "text": FOLDED_MARK}, {"role": "assistant", "text": summary}]
+            return pair + history[n:], n
+    return history, 0
+
+
+def _remember_folded(raw: list[dict], applied: int, folded) -> int | None:
+    """Запоминает резюме сервера. count считается по отправленной истории; applied — сколько
+    исходных реплик уже стояло за парой резюме в ней. -> число свёрнутых исходных реплик."""
+    try:
+        count, summary = int(folded["count"]), folded["summary"]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not isinstance(summary, str) or not summary or count < 1:
+        return None
+    if applied:
+        if count < 2:
+            return None
+        count = applied + count - 2
+    if count > len(raw):
+        return None
+    _store_folded(raw, count, summary)
+    return count
+
+
+def _store_folded(raw: list[dict], count: int, summary: str) -> None:
+    key = _prefix_hash(raw, count)
+    _FOLDED.pop(key, None)
+    _FOLDED[key] = (count, summary)
+    while len(_FOLDED) > _FOLDED_KEEP:
+        _FOLDED.pop(next(iter(_FOLDED)))
+
+
+# ---------------------------------------------------------------- сжатие истории (как /compact)
+
+_compact_block_until = 0.0
+
+
+def _compact_threshold() -> int | None:
+    """PROXY_COMPACT_AT: доля LIMIT_PROMPT (0.7 по умолчанию), с которой история сжимается; off — выключено."""
+    raw = os.environ.get("PROXY_COMPACT_AT", "").strip().lower()
+    if raw in ("off", "no", "false", "0"):
+        return None
+    try:
+        share = float(raw) if raw else 0.7
+    except ValueError:
+        share = 0.7
+    if not 0.1 <= share <= 0.95:
+        share = 0.7
+    return int(LIMIT_PROMPT * share)
+
+
+def _compact_cut(raw: list[dict], stable_n: int) -> int:
+    """Сколько первых реплик заменить резюме: не больше stable_n, дальше стоит реплика пользователя."""
+    for n in range(min(stable_n, len(raw) - 2), 1, -1):
+        if raw[n]["role"] == "user":
+            return n
+    return 0
+
+
+async def _maybe_compact(ask_body: dict, tinfo: dict, model: str, key: str) -> int | None:
+    """История перешла порог: один тихий запрос за резюме начала разговора (без инструментов).
+    Две-три последние реплики остаются как есть. -> число замененных реплик или None.
+    Неудача не страшна: история режется, как прежде; новую попытку делаем не раньше COMPACT_PAUSE."""
+    global _compact_block_until
+    limit = _compact_threshold()
+    if not limit or time.monotonic() < _compact_block_until:
+        return None
+    size = len(ask_body["prompt"]) + sum(len(h["text"]) for h in ask_body.get("history") or [])
+    if size < limit:
+        return None
+    raw = tinfo["raw_history"]
+    n = _compact_cut(raw, tinfo["stable_n"])
+    if not n or _prefix_hash(raw, n) in _FOLDED:
+        return None
+    st = _State()
+    try:
+        async for _ in _ask_stream({"prompt": COMPACT_PROMPT, "model": model, "history": raw[:n]},
+                                   key + "-compact", st):
+            pass
+    except Exception:
+        st = None
+    summary = "".join(st.parts).strip() if st is not None else ""
+    if not summary or not st.saw_done or _finish_reason(st) != "stop":
+        _compact_block_until = time.monotonic() + COMPACT_PAUSE
+        return None
+    _store_folded(raw, n, summary)
+    return n
+
+
 def _build(messages: list, tools: list[dict] | None, model: str) -> tuple[dict, bool, dict]:
     """messages/tools -> (тело POST /v1/ask, флаг «что-то обрезано», сведения о каталоге инструментов)."""
     truncated = False
@@ -339,7 +511,9 @@ def _build(messages: list, tools: list[dict] | None, model: str) -> tuple[dict, 
     if dropped:
         truncated = True
     systems: list[str] = []
-    entries: list[str] = []
+    # Разговор идёт в поле history с настоящими ролями (user/assistant); в prompt — только новейшее
+    # сообщение. Элемент: [роль, текст, это_результат_инструмента].
+    entries: list[list] = []
     call_names: dict = {}
     for m in messages:
         if not isinstance(m, dict):
@@ -351,20 +525,45 @@ def _build(messages: list, tools: list[dict] | None, model: str) -> tuple[dict, 
             name = m.get("name") or call_names.get(m.get("tool_call_id")) or "tool"
             if len(text) > LIMIT_TOOL_RESULT:
                 text, truncated, tool_cut = _cut(text, LIMIT_TOOL_RESULT), True, True
-            entries.append(f"tool {name}: {text}")
+            entries.append(["user", f"Результат инструмента {name}:\n{text}", True])
         elif role == "assistant":
-            lines = [text] if text else []
+            calls: list[tuple] = []
             for tc in m.get("tool_calls") or []:
                 fn = (tc or {}).get("function") or {}
                 call_names[(tc or {}).get("id")] = fn.get("name")
-                lines.append(f"called {fn.get('name')} {fn.get('arguments') or '{}'}")
-            entries.append("assistant: " + "\n".join(lines))
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except ValueError:
+                    args = fn.get("arguments")
+                calls.append((fn.get("name"), args))
+            if text or calls:
+                entries.append(["assistant", _call_text(text, calls, False), False, (text, calls)])
         else:
-            entries.append(f"user: {text}")
+            entries.append(["user", text, False])
 
-    omitted = len(entries) > LIMIT_HISTORY
+    # Старые шаги (кроме двух последних) ужимаются: результат — до начала и длины, вызов — без длинных
+    # строк в args. Большие чтения и записи иначе вытесняют из истории задачу и прежние шаги.
+    tool_idx = [i for i, e in enumerate(entries) if e[2]]
+    for i in tool_idx[:-2]:
+        entries[i][1] = _old_result(entries[i][1])
+    call_idx = [i for i, e in enumerate(entries) if len(e) > 3 and e[3][1]]
+    for i in call_idx[:-2]:
+        entries[i][1] = _call_text(entries[i][3][0], entries[i][3][1], True)
+    # Реплики до first_live уже в окончательном виде (позже они не меняются): их можно заменить резюме.
+    live = tool_idx[-2:] + call_idx[-2:]
+    first_live = min(live) if live else len(entries)
+    # Новейшее сообщение уходит в prompt; если последним стоит ответ модели — просим продолжить.
+    if entries and entries[-1][0] == "user":
+        last_text = entries.pop()[1]
+    else:
+        last_text = "Продолжайте."
+    # Первое сообщение пользователя (сама задача) всегда остаётся в начале истории.
+    pin = _cut(entries[0][1], LIMIT_PIN) if entries and entries[0][0] == "user" and not entries[0][2] else ""
+    if pin:
+        entries = entries[1:]
+    omitted = len(entries) > LIMIT_HISTORY - 4  # место под задачу, пометку и пару повтора
     if omitted:
-        entries, truncated = entries[-LIMIT_HISTORY:], True
+        entries, truncated = entries[-(LIMIT_HISTORY - 4):], True
 
     # system: что не влезло в room, не теряется, а уходит в голову prompt (стабильное — первым).
     notes = _notes_text() if tools else ""
@@ -380,38 +579,43 @@ def _build(messages: list, tools: list[dict] | None, model: str) -> tuple[dict, 
         sys_text, truncated = _cut(sys_text, max(room, 0)), True
     system = "\n\n".join(s for s in (sys_text, protocol) if s)
 
-    # С инструментами напоминание стоит прямо перед местом ответа: протокол в system остаётся
-    # далеко от конца длинной стенограммы, и модель продолжает её текстом прежних реплик.
-    cue = ("\n\n" + TOOLS_REMINDER if tools else "") + "\n\nassistant:"
+    # prompt = каталог инструментов (и спилл system) + новейшее сообщение; роли и правила в нём не метим.
     head = "".join(p + "\n\n" for p in (spill, catalog) if p)
-    budget = LIMIT_PROMPT - len(head) - len(OMIT) - 2 - len(cue)
-    kept: list[str] = []
+    if len(head) + len(last_text) > LIMIT_PROMPT:
+        last_text, truncated, omitted = _cut(last_text, max(LIMIT_PROMPT - len(head), 0)), True, True
+    prompt = head + last_text
+    budget = LIMIT_PROMPT - len(prompt) - len(OMIT) - 2 - (len(pin) + 2 if pin else 0)
+    kept: list[list] = []
     total = 0
     for e in reversed(entries):
-        if total + len(e) + 2 > budget:
-            if not kept:
-                kept.append(_cut(e, budget))
+        if total + len(e[1]) + 2 > budget:
+            if not kept and budget > 0:
+                kept.append([e[0], _cut(e[1], budget), e[2]])
             omitted = True
             truncated = True
             break
         kept.append(e)
-        total += len(e) + 2
+        total += len(e[1]) + 2
     kept.reverse()
 
-    if len(kept) == 1 and kept[0].startswith("user: ") and not omitted:
-        prompt = kept[0][6:]
-    else:
-        prompt = ("\n\n".join([OMIT] if omitted else []) + ("\n\n" if omitted else "")
-                  + "\n\n".join(kept) + cue)
-    prompt = head + prompt
-
+    history = ([{"role": "user", "text": pin}] if pin else []) \
+        + ([{"role": "user", "text": OMIT}] if omitted else []) \
+        + [{"role": e[0], "text": e[1]} for e in kept]
+    raw_history = history
+    # Индексы реплик в raw_history совпадают с индексами в entries (задача и так стоит первой);
+    # при обрезке истории (omitted) сдвиг неизвестен, сжатие не предлагаем.
+    stable_n = 0 if omitted else max(0, min(first_live, len(raw_history) - 2))
+    history, folded_applied = _apply_folded(history)
     body: dict = {"prompt": prompt or " ", "model": model}
+    if history:
+        body["history"] = history
     if system:
         body["system"] = system
     info = {"sent": sent, "dropped": len(dropped), "dropped_names": dropped[:5],
             "system_chars": len(system), "system_cut": bool(spill),
             "spill_chars": len(spill), "prompt_cut": omitted or tool_cut,
-            "catalog_chars": len(catalog), "history_chars": total}
+            "catalog_chars": len(catalog), "history_chars": total,
+            "raw_history": raw_history, "folded_applied": folded_applied, "stable_n": stable_n}
     return body, truncated, info
 
 
@@ -447,6 +651,17 @@ def _parse_call(text: str) -> dict | None:
             continue
         if isinstance(obj, dict) and isinstance(obj.get("tool"), str):
             return obj
+    # «Читаю файл… {"tool": ...}»: вызов внутри текста — первый объект с ключом tool
+    dec, pos = json.JSONDecoder(), s.find("{")
+    while pos != -1:
+        try:
+            obj, end = dec.raw_decode(s, pos)
+        except ValueError:
+            pos = s.find("{", pos + 1)
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("tool"), str):
+            return obj
+        pos = s.find("{", end)
     return None
 
 
@@ -549,6 +764,156 @@ def _note_missing_key() -> None:
               "или в окружении и перезапустите прокси.", file=sys.stderr)
 
 
+# ---------------------------------------------------------------- режим code (опыт)
+# PROXY_BACKEND=code: прокси не просит модель писать JSON-вызовы, а отдаёт задачу нашему серверу (/execute),
+# который ведёт настоящий цикл /v1/code (инструменты модели выполняются в ASK_ROOT). Инструменты Cline
+# в этом режиме не используются: он видит только текст. По умолчанию режим выключен (PROXY_BACKEND=ask).
+
+def _backend() -> str:
+    return "code" if os.environ.get("PROXY_BACKEND", "").strip().lower() == "code" else "ask"
+
+
+_ENV_BLOCK = re.compile(r"<environment_details>.*?</environment_details>", re.S)
+_TASK_TAG = re.compile(r"<task>\s*(.*?)\s*</task>", re.S)
+
+
+def _task_text(content) -> str:
+    """Текст сообщения пользователя без служебной обвязки Cline (<environment_details>, <task>)."""
+    text = _ENV_BLOCK.sub("", _text(content)).strip()
+    m = _TASK_TAG.search(text)
+    return (m.group(1) if m else text).strip()
+
+
+def _user_texts(messages: list) -> list[str]:
+    return [t for m in messages if isinstance(m, dict) and m.get("role") == "user"
+            for t in [_task_text(m.get("content"))] if t]
+
+
+def _code_session(texts: list[str]) -> str | None:
+    """Одна задача Cline = одна сессия нашего сервера: id берётся от первого сообщения пользователя."""
+    if not texts:
+        return None
+    return "cline-" + hashlib.sha256(texts[0].encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _code_body(messages: list) -> dict | None:
+    texts = _user_texts(messages)
+    if not texts:
+        return None
+    body: dict = {"prompt": _cut(texts[-1], LIMIT_PROMPT)}
+    session = _code_session(texts)
+    # неизвестный id наш сервер превращает в новую сессию; дальше она сама помнит прошлые ходы
+    if session:
+        body["session_id"] = session
+    mode = os.environ.get("PROXY_CODE_MODE", "").strip().lower()
+    if mode in ("all", "edits", "plan"):
+        body["mode"] = mode
+    return body
+
+
+async def _code_events(body: dict):
+    """События POST /execute нашего сервера. Ошибки — AskError (до первого события — честный 502/429)."""
+    try:
+        base = _local_api_url()
+    except ValueError as e:
+        raise AskError(str(e)) from e
+    timeout = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0)
+    try:
+        async with httpx.AsyncClient(base_url=base, timeout=timeout) as client:
+            async with client.stream("POST", "/execute", json=body) as r:
+                if r.status_code >= 400:
+                    raise AskError(_api_error_text(r.status_code, await r.aread()))
+                async for event, data, _ in _api_frames(r):
+                    yield event, data
+    except httpx.ConnectError as e:
+        raise AskError(f"Наш сервер API не отвечает на {base}: запустите его (npm start) или смените "
+                       f"PROXY_BACKEND на ask. ({type(e).__name__})") from e
+    except httpx.HTTPError as e:
+        raise AskError(f"Сетевая ошибка при обращении к нашему серверу API: {type(e).__name__}: {e}") from e
+
+
+def _code_piece(event: str, data: dict, state: _State) -> str:
+    """Что показать в чате по событию задачи ('' — ничего). Заодно копит ответ и расход в state."""
+    if event == "delta":
+        text = str(data.get("text") or "")
+        state.parts.append(text)
+        return text
+    if event == "tool":
+        ok = "" if data.get("ok", True) else " (отказ/сбой)"
+        line = f"\n▸ {data.get('name')}{ok}\n"
+        return line
+    if event == "usage":
+        state.usage = data
+    elif event == "done":
+        state.done = data
+    elif event == "error":
+        msg = str(data.get("message") or data)
+        state.parts.append(f"\n[ошибка задачи: {msg}]")
+        return f"\n[ошибка задачи: {msg}]"
+    return ""
+
+
+async def _chat_code(request: Request, messages: list, stream: bool, model: str, key: str,
+                     tools_n: int, t0: float):
+    log = _new_log(request.url.path, stream, tools_n, key)
+    log["backend"] = "code"
+    state = _State()
+    ids = _Ids(model)
+    body = _code_body(messages)
+    if body is None:
+        _emit(log, None, t0, "http_400")
+        return _error(400, "В сообщениях нет текста пользователя.")
+    log["prompt_chars"] = len(body["prompt"])
+    log["session"] = body.get("session_id")
+    await _slots.acquire()
+    handed_over = False
+    try:
+        gen = _code_events(body)
+        if not stream:
+            chunks: list[str] = []
+            async for event, data in gen:
+                chunks.append(_code_piece(event, data, state))
+            text = "".join(chunks).strip()
+            _emit(log, state, t0, "ok")
+            return JSONResponse(ids.completion({"role": "assistant", "content": text}, "stop", state))
+        # stream: первое событие читаем до ответа, чтобы ошибка соединения стала честным 502
+        first = await gen.__anext__()
+
+        async def pump():
+            try:
+                yield ids.chunk({"role": "assistant"})
+                piece = _code_piece(*first, state)
+                if piece:
+                    yield ids.chunk({"content": piece})
+                async for event, data in gen:
+                    piece = _code_piece(event, data, state)
+                    if piece:
+                        yield ids.chunk({"content": piece})
+                yield ids.chunk({}, "stop", {"usage": _usage(state), "x_ask": _x_ask(state)})
+                yield _sse("[DONE]")
+                _emit(log, state, t0, "ok")
+            except AskError as e:
+                yield ids.chunk({"content": f"\n[ошибка: {e}]"}, "stop")
+                yield _sse("[DONE]")
+                _emit(log, state, t0, "ask_error")
+            finally:
+                await gen.aclose()
+                _slots.release()
+
+        handed_over = True
+        return StreamingResponse(pump(), media_type="text/event-stream")
+    except StopAsyncIteration:
+        _emit(log, state, t0, "ask_error")
+        return _error(502, "Наш сервер API закрыл поток без событий.", "ask_error", "api_error")
+    except AskError as e:
+        resp = _ask_error_response(e)
+        _emit(log, state, t0, "http_429" if resp.status_code == 429 else "ask_error")
+        return resp
+    finally:
+        if not handed_over:
+            _slots.release()
+
+
 async def chat(request: Request):
     if not _authorized(request):
         return _denied()
@@ -568,23 +933,25 @@ async def chat(request: Request):
     stream = bool(body.get("stream"))
     model = _resolve_model(body.get("model"))
     key = _idempotency_key(request)
+    if _backend() == "code":
+        return await _chat_code(request, messages, stream, model, key, len(tools), t0)
     ask_body, truncated, tinfo = _build(messages, tools or None, model)
     log = _new_log(request.url.path, stream, len(tools), key)
-    log["prompt_chars"] = len(ask_body["prompt"])
-    log["truncated"] = truncated
-    log["tools_sent"], log["tools_dropped"] = tinfo["sent"], tinfo["dropped"]
-    log["tools_dropped_names"] = tinfo["dropped_names"]
-    log["system_chars"], log["system_cut"] = tinfo["system_chars"], tinfo["system_cut"]
-    log["spill_chars"], log["prompt_cut"] = tinfo["spill_chars"], tinfo["prompt_cut"]
-    log["catalog_chars"], log["history_chars"] = tinfo["catalog_chars"], tinfo["history_chars"]
+    _fill_log(log, ask_body, truncated, tinfo)
+    log["folded"], log["compacted"] = None, None
     state = _State()
     ids = _Ids(model)
 
     await _slots.acquire()
     handed_over = False
     try:
+        compacted = await _maybe_compact(ask_body, tinfo, model, key)
+        if compacted:
+            ask_body, truncated, tinfo = _build(messages, tools or None, model)
+            _fill_log(log, ask_body, truncated, tinfo)
+            log["compacted"] = compacted
         if stream and not tools:
-            response = await _stream_plain(ask_body, key, state, ids, log, t0)
+            response = await _stream_plain(ask_body, key, state, ids, log, t0, tinfo)
             handed_over = True
             return response
 
@@ -595,10 +962,26 @@ async def chat(request: Request):
             message, finish, tool, fallback = _classify(text, [d[0] for d in _tool_defs(tools)])
             log["tool"], log["fallback"] = tool, fallback
             log["fallback_reason"] = "no_call" if fallback else None
+            if fallback and _REFUSAL.search(text):
+                # модель отказалась («нет инструментов»): один раз повторяем с жёстким напоминанием
+                # отказ входит в историю как ответ модели, замечание — новое сообщение пользователя
+                retry_body = dict(ask_body)
+                retry_body["history"] = list(ask_body.get("history") or []) + [
+                    {"role": "user", "text": ask_body["prompt"]},
+                    {"role": "assistant", "text": text or "…"}]
+                retry_body["prompt"] = _RETRY_NOTE
+                state = _State()
+                async for _ in _ask_stream(retry_body, key + "-retry", state):
+                    pass
+                text = "".join(state.parts)
+                message, finish, tool, fallback = _classify(text, [d[0] for d in _tool_defs(tools)])
+                log["tool"], log["fallback"] = tool, fallback
+                log["fallback_reason"] = ("retry_no_call" if fallback else "retry_ok")
             if finish == "stop":
                 finish = _finish_reason(state)
         else:
             message, finish = {"role": "assistant", "content": text}, _finish_reason(state)
+        _note_folded(log, state, tinfo)
         status = "tool_calls" if log["tool"] else "ok"
         _emit(log, state, t0, status)
         if not stream:
@@ -618,6 +1001,23 @@ async def chat(request: Request):
             _slots.release()
 
 
+def _fill_log(log: dict, ask_body: dict, truncated: bool, tinfo: dict) -> None:
+    log["prompt_chars"] = len(ask_body["prompt"]) + sum(len(h["text"]) for h in ask_body.get("history") or [])
+    log["truncated"] = truncated
+    log["tools_sent"], log["tools_dropped"] = tinfo["sent"], tinfo["dropped"]
+    log["tools_dropped_names"] = tinfo["dropped_names"]
+    log["system_chars"], log["system_cut"] = tinfo["system_chars"], tinfo["system_cut"]
+    log["spill_chars"], log["prompt_cut"] = tinfo["spill_chars"], tinfo["prompt_cut"]
+    log["catalog_chars"], log["history_chars"] = tinfo["catalog_chars"], tinfo["history_chars"]
+    log["folded_applied"] = tinfo["folded_applied"]
+
+
+def _note_folded(log: dict, state: _State, tinfo: dict) -> None:
+    """Сервер сжал историю (folded): запоминаем резюме и пишем число свёрнутых реплик в лог."""
+    if state.folded:
+        log["folded"] = _remember_folded(tinfo["raw_history"], tinfo["folded_applied"], state.folded)
+
+
 async def _canned_stream(ids: _Ids, message: dict, finish: str, state: _State):
     """Ответ с tools уже получен целиком: отдаём его тремя чанками и [DONE]."""
     yield ids.chunk({"role": "assistant"})
@@ -630,7 +1030,8 @@ async def _canned_stream(ids: _Ids, message: dict, finish: str, state: _State):
     yield _sse("[DONE]")
 
 
-async def _stream_plain(ask_body: dict, key: str, state: _State, ids: _Ids, log: dict, t0: float):
+async def _stream_plain(ask_body: dict, key: str, state: _State, ids: _Ids, log: dict, t0: float,
+                        tinfo: dict | None = None):
     """stream:true без tools: события _ask_stream переводятся в чанки OpenAI.
 
     До первого delta ошибка ещё может стать честным 502/429 (AskError уходит наверх),
@@ -683,6 +1084,8 @@ async def _stream_plain(ask_body: dict, key: str, state: _State, ids: _Ids, log:
                     await _stop_run(state.run_id)
                 await agen.aclose()
             _slots.release()
+            if tinfo is not None:
+                _note_folded(log, state, tinfo)
             _emit(log, state, t0, status)
 
     return StreamingResponse(body(), media_type="text/event-stream")
@@ -691,6 +1094,49 @@ async def _stream_plain(ask_body: dict, key: str, state: _State, ids: _Ids, log:
 async def _server_error(request: Request, exc: Exception):
     traceback.print_exception(exc)
     return _error(500, "Внутренняя ошибка прокси.", "internal_error", "api_error")
+
+
+class _AccessLog:
+    """Строка JSON на каждый входящий запрос (в том числе 401/404), до обработчиков.
+    Токен и тело не пишутся. Отключается PROXY_ACCESS_LOG=off."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or os.environ.get("PROXY_ACCESS_LOG", "").strip().lower() == "off":
+            await self.inner(scope, receive, send)
+            return
+        t0 = time.monotonic()
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        seen = {"status": None}
+
+        async def wrapped_send(message):
+            if message.get("type") == "http.response.start":
+                seen["status"] = message.get("status")
+            await send(message)
+
+        def line(note: str) -> None:
+            auth = headers.get("authorization", "")
+            rec = {
+                "access": True,
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "method": scope.get("method"), "path": scope.get("path"),
+                "client": (scope.get("client") or ["?"])[0],
+                "status": seen["status"], "auth_header": bool(auth),
+                "token_ok": _authorized(Request(scope)) if auth else False,
+                "content_length": headers.get("content-length"),
+                "user_agent": headers.get("user-agent", "")[:60],
+                "ms": int((time.monotonic() - t0) * 1000), "note": note,
+            }
+            _write_line(json.dumps(rec, ensure_ascii=False))
+
+        try:
+            await self.inner(scope, receive, wrapped_send)
+        except BaseException as e:
+            line(f"exception:{type(e).__name__}")
+            raise
+        line("")
 
 
 app = Starlette(
@@ -702,6 +1148,7 @@ app = Starlette(
     ],
     exception_handlers={Exception: _server_error},
 )
+app.add_middleware(_AccessLog)
 
 
 def main() -> None:
@@ -722,7 +1169,11 @@ def main() -> None:
     except ValueError:
         print(f"PROXY_PORT должен быть числом, получено: {raw_port!r}", file=sys.stderr)
         raise SystemExit(2)
-    print(f"ask OpenAI proxy http://{host}:{port}/v1, base url: {BASE_URL}", file=sys.stderr)
+    if "PROXY_LOG_FILE" not in os.environ:  # по умолчанию project/proxy.log; пустое значение отключает файл
+        os.environ["PROXY_LOG_FILE"] = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                                    "proxy.log")
+    print(f"ask OpenAI proxy http://{host}:{port}/v1, base url: {BASE_URL}, log: "
+          f"{os.environ['PROXY_LOG_FILE'] or 'только stderr'}", file=sys.stderr)
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
