@@ -832,6 +832,25 @@ async def _code_events(body: dict):
         raise AskError(f"Сетевая ошибка при обращении к нашему серверу API: {type(e).__name__}: {e}") from e
 
 
+_TOOL_ARG_KEYS = {
+    "read_file": ("path",), "write_file": ("path",), "edit_file": ("path",),
+    "run_command": ("command",), "search": ("pattern",), "list_files": ("path",),
+    "browser": ("url",),
+}
+
+
+def _tool_arg(name: str, args) -> str:
+    """Главный аргумент вызова для строки в чате: путь, команда, шаблон. Содержимое файлов не показываем."""
+    if not isinstance(args, dict):
+        return ""
+    for key in _TOOL_ARG_KEYS.get(name, ()):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            one = " ".join(value.split())
+            return one if len(one) <= 80 else one[:77] + "..."
+    return ""
+
+
 def _code_piece(event: str, data: dict, state: _State) -> str:
     """Что показать в чате по событию задачи ('' — ничего). Заодно копит ответ и расход в state."""
     if event == "delta":
@@ -840,7 +859,8 @@ def _code_piece(event: str, data: dict, state: _State) -> str:
         return text
     if event == "tool":
         ok = "" if data.get("ok", True) else " (отказ/сбой)"
-        line = f"\n▸ {data.get('name')}{ok}\n"
+        arg = _tool_arg(str(data.get("name") or ""), data.get("input"))
+        line = f"\n▸ {data.get('name')}{' ' + arg if arg else ''}{ok}\n"
         return line
     if event == "usage":
         state.usage = data

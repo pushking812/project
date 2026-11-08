@@ -15,6 +15,13 @@ def _no_tools_dump(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _default_backend(monkeypatch):
+    # Режим прокси в mcp\.env (PROXY_BACKEND=code) не должен менять результат тестов; свои тесты задают его сами.
+    monkeypatch.setenv("PROXY_BACKEND", "ask")
+    monkeypatch.delenv("PROXY_CODE_MODE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_autosession(monkeypatch, tmp_path):
     # Автосессия по умолчанию выключена и не трогает настоящий файл пользователя; тесты автосессии включают её сами.
     from ask_mcp import autosession

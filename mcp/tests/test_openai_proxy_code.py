@@ -128,3 +128,13 @@ def test_code_backend_without_user_text_is_400(monkeypatch):
     install(monkeypatch)
     r = post({"messages": [{"role": "system", "content": "правила"}]})
     assert r.status_code == 400
+
+
+def test_tool_line_shows_main_argument():
+    s = openai_proxy._State()
+    piece = openai_proxy._code_piece(
+        "tool", {"name": "write_file", "input": {"path": "helloworld.txt", "content": "secret body"}}, s)
+    assert "write_file helloworld.txt" in piece and "secret body" not in piece
+    cmd = openai_proxy._code_piece("tool", {"name": "run_command", "input": {"command": "a\n" + "b" * 200}}, s)
+    assert "a b" in cmd and len(cmd) < 120
+    assert openai_proxy._code_piece("tool", {"name": "other", "input": {"x": 1}}, s).strip() == "▸ other"
