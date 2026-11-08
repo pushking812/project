@@ -136,7 +136,7 @@ test('POST /execute creates a file; done.steps says so', async () => {
   assert.deepEqual(done(r.events).steps, ['wrote hello.txt']);
   assert.equal(done(r.events).answer, 'created');
   const tool = r.events.find((e) => e.event === 'tool');
-  assert.deepEqual(tool.data, { name: 'write_file', ok: true, callId: '1' });
+  assert.deepEqual(tool.data, { name: 'write_file', ok: true, callId: '1', path: 'hello.txt' });
   assert.equal(r.events[0].event, 'status');
 });
 

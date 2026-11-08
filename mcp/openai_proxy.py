@@ -851,6 +851,16 @@ def _tool_arg(name: str, args) -> str:
     return ""
 
 
+def _done_summary(data: dict) -> str:
+    """Итог по факту из done.steps: что сервер реально сделал на компьютере (не со слов модели)."""
+    steps = [" ".join(str(s).split()) for s in (data.get("steps") or []) if str(s).strip()]
+    if not steps:
+        return ""
+    shown = [s if len(s) <= 120 else s[:117] + "..." for s in steps[:20]]
+    more = f"\n- … и ещё {len(steps) - 20}" if len(steps) > 20 else ""
+    return "\n\nСделано на компьютере:\n" + "\n".join(f"- {s}" for s in shown) + more + "\n"
+
+
 def _code_piece(event: str, data: dict, state: _State) -> str:
     """Что показать в чате по событию задачи ('' — ничего). Заодно копит ответ и расход в state."""
     if event == "delta":
@@ -859,13 +869,15 @@ def _code_piece(event: str, data: dict, state: _State) -> str:
         return text
     if event == "tool":
         ok = "" if data.get("ok", True) else " (отказ/сбой)"
-        arg = _tool_arg(str(data.get("name") or ""), data.get("input"))
+        # наш сервер шлёт в событии только path; input есть у прямого потока сайта
+        arg = _tool_arg(str(data.get("name") or ""), data.get("input") or {"path": data.get("path")})
         line = f"\n▸ {data.get('name')}{' ' + arg if arg else ''}{ok}\n"
         return line
     if event == "usage":
         state.usage = data
     elif event == "done":
         state.done = data
+        return _done_summary(data)
     elif event == "error":
         msg = str(data.get("message") or data)
         state.parts.append(f"\n[ошибка задачи: {msg}]")

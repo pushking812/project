@@ -140,6 +140,26 @@ def test_tool_line_shows_main_argument():
     assert openai_proxy._code_piece("tool", {"name": "other", "input": {"x": 1}}, s).strip() == "▸ other"
 
 
+def test_tool_line_uses_path_from_our_server_event():
+    # наш /execute шлёт {name, ok, callId, path} без input
+    s = openai_proxy._State()
+    piece = openai_proxy._code_piece("tool", {"name": "read_file", "ok": True, "callId": "1", "path": "a/b.md"}, s)
+    assert piece.strip() == "▸ read_file a/b.md"
+    bad = openai_proxy._code_piece("tool", {"name": "edit_file", "ok": False, "callId": "2", "path": "x.py"}, s)
+    assert "edit_file x.py (отказ/сбой)" in bad
+    assert openai_proxy._code_piece("tool", {"name": "run_command", "ok": True, "callId": "3"}, s).strip() == "▸ run_command"
+
+
+def test_done_event_shows_steps_summary():
+    s = openai_proxy._State()
+    piece = openai_proxy._code_piece("done", {"steps": ["wrote hello.txt", "ran pytest"], "answer": "x"}, s)
+    assert "Сделано на компьютере" in piece and "- wrote hello.txt" in piece and "- ran pytest" in piece
+    assert s.done["answer"] == "x"
+    assert openai_proxy._code_piece("done", {"steps": []}, openai_proxy._State()) == ""
+    many = openai_proxy._code_piece("done", {"steps": [f"s{i}" for i in range(25)]}, openai_proxy._State())
+    assert "и ещё 5" in many
+
+
 def log_lines(capsys) -> list[dict]:
     return [json.loads(ln) for ln in capsys.readouterr().err.splitlines() if ln.startswith("{")]
 
