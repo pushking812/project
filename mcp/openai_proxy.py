@@ -789,11 +789,60 @@ def _user_texts(messages: list) -> list[str]:
             for t in [_task_text(m.get("content"))] if t]
 
 
+_SESSION_SEEN: dict[str, tuple[float, float]] = {}  # хеш первого текста -> (начало, последний запрос)
+_SESSION_GAP = 3600.0  # пауза, после которой тот же первый текст считается новой задачей
+
+
 def _code_session(texts: list[str]) -> str | None:
     """Одна задача Cline = одна сессия нашего сервера: id берётся от первого сообщения пользователя."""
     if not texts:
         return None
-    return "cline-" + hashlib.sha256(texts[0].encode("utf-8", "replace")).hexdigest()[:16]
+    key = hashlib.sha256(texts[0].encode("utf-8", "replace")).hexdigest()[:16]
+    now = time.time()
+    started, last = _SESSION_SEEN.get(key, (now, now))
+    # тот же первый текст после долгой паузы и без продолжения диалога — новая задача
+    if len(texts) == 1 and now - last > _SESSION_GAP:
+        started = now
+    _SESSION_SEEN[key] = (started, now)
+    return f"cline-{key}-{time.strftime('%Y%m%d%H%M%S', time.gmtime(started))}"
+
+
+_SESSION_USED: dict[str, dict] = {}  # id сессии -> {"week": потрачено единиц, "requests": число запросов}
+
+
+async def _used_now() -> dict | None:
+    """Сколько единиц лимита потрачено сейчас (GET /me нашего сервера): {"week", "window"}; при сбое None."""
+    try:
+        base = _local_api_url()
+        async with httpx.AsyncClient(base_url=base, timeout=httpx.Timeout(3.0)) as client:
+            r = await client.get("/me")
+        if r.status_code != 200:
+            return None
+        lim = (r.json() or {}).get("limits") or {}
+        week = (lim.get("week") or {}).get("used")
+        window = (lim.get("session") or {}).get("used")
+        out = {k: float(v) for k, v in (("week", week), ("window", window)) if isinstance(v, (int, float))}
+        return out or None
+    except (ValueError, httpx.HTTPError):
+        return None
+
+
+async def _note_used(log: dict, session: str | None, before: dict | None) -> None:
+    """Пишет в лог расход запроса и итог по сессии Cline. Расход другого окна/задач в это же время попадёт сюда же."""
+    if not before:
+        return
+    after = await _used_now()
+    if not after:
+        return
+    delta = {k: round(after[k] - before[k], 4) for k in after if k in before and after[k] >= before[k]}
+    if not delta:  # окно лимита сбросилось между замерами
+        return
+    log["used_delta"] = delta
+    if session and "week" in delta:
+        total = _SESSION_USED.setdefault(session, {"week": 0.0, "requests": 0})
+        total["week"] = round(total["week"] + delta["week"], 4)
+        total["requests"] += 1
+        log["session_used"] = dict(total)
 
 
 def _code_body(messages: list) -> dict | None:
@@ -906,12 +955,14 @@ async def _chat_code(request: Request, messages: list, stream: bool, model: str,
     await _slots.acquire()
     handed_over = False
     try:
+        before = await _used_now()
         gen = _code_events(body)
         if not stream:
             chunks: list[str] = []
             async for event, data in gen:
                 chunks.append(_code_piece(event, data, state))
             text = "".join(chunks).strip()
+            await _note_used(log, body.get("session_id"), before)
             _emit(log, state, t0, "ok")
             return JSONResponse(ids.completion({"role": "assistant", "content": text}, "stop", state))
         # stream: первое событие читаем до ответа, чтобы ошибка соединения стала честным 502
@@ -929,6 +980,7 @@ async def _chat_code(request: Request, messages: list, stream: bool, model: str,
                         yield ids.chunk({"content": piece})
                 yield ids.chunk({}, "stop", {"usage": _usage(state), "x_ask": _x_ask(state)})
                 yield _sse("[DONE]")
+                await _note_used(log, body.get("session_id"), before)
                 _emit(log, state, t0, "ok")
             except AskError as e:
                 yield ids.chunk({"content": f"\n[ошибка: {e}]"}, "stop")

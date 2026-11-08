@@ -41,7 +41,8 @@ def install(monkeypatch, execute=None):
     seen: list[httpx.Request] = []
 
     def handler(req: httpx.Request):
-        seen.append(req)
+        if req.url.path != "/me":  # замер расхода (/me) тесты задачи не считают
+            seen.append(req)
         if req.url.path == "/execute":
             return execute(req) if execute else httpx.Response(200, content=TASK)
         return httpx.Response(404)
@@ -58,6 +59,56 @@ def post(body):
 
 def user(text):
     return {"role": "user", "content": text}
+
+
+def test_session_id_has_time_and_restarts_after_gap(monkeypatch):
+    import openai_proxy as p
+    clock = [1_000_000.0]
+    monkeypatch.setattr(p.time, "time", lambda: clock[0])
+    monkeypatch.setattr(p, "_SESSION_SEEN", {})
+    a = p._code_session(["задача"])
+    clock[0] += 60
+    assert p._code_session(["задача"]) == a  # повтор того же запроса — та же сессия
+    assert p._code_session(["задача", "ещё"]) == a
+    clock[0] += p._SESSION_GAP + 1
+    assert p._code_session(["задача", "ещё"]) == a  # диалог продолжается
+    clock[0] += p._SESSION_GAP + 1
+    b = p._code_session(["задача"])  # пауза и новый диалог с тем же текстом
+    assert b != a and b.startswith("cline-") and len(b) <= 64
+
+
+def test_code_request_logs_used_delta_and_session_total(monkeypatch, capsys):
+    monkeypatch.setenv("PROXY_BACKEND", "code")
+    monkeypatch.setattr(openai_proxy, "_SESSION_USED", {})
+    used = iter([10.0, 10.5, 10.5, 11.0])  # до и после первого запроса, до и после второго
+
+    def handler(req: httpx.Request):
+        if req.url.path == "/execute":
+            return httpx.Response(200, content=TASK)
+        if req.url.path == "/me":
+            week = next(used)
+            return httpx.Response(200, json={"limits": {"week": {"used": week}, "session": {"used": week / 10}}})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _ORIG_CLIENT(transport=transport, **k))
+    monkeypatch.setattr(openai_proxy.time, "time", lambda: 1_000_000.0)
+    monkeypatch.setattr(openai_proxy, "_SESSION_SEEN", {})
+    body = {"messages": [user(CLINE_FIRST)]}
+    assert post(body).status_code == 200
+    assert post(body).status_code == 200
+    logs = [json.loads(l) for l in capsys.readouterr().err.splitlines() if l.startswith("{") and '"backend"' in l]
+    assert logs[0]["used_delta"] == {"week": 0.5, "window": 0.05}
+    assert logs[0]["session_used"] == {"week": 0.5, "requests": 1}
+    assert logs[1]["session_used"] == {"week": 1.0, "requests": 2}
+
+
+def test_used_is_skipped_when_me_fails(monkeypatch, capsys):
+    monkeypatch.setenv("PROXY_BACKEND", "code")
+    install(monkeypatch)  # /me даёт 404
+    assert post({"messages": [user(CLINE_FIRST)]}).status_code == 200
+    logs = [json.loads(l) for l in capsys.readouterr().err.splitlines() if l.startswith("{") and '"backend"' in l]
+    assert "used_delta" not in logs[0] and "session_used" not in logs[0]
 
 
 def test_default_backend_never_calls_execute(monkeypatch):
