@@ -225,6 +225,34 @@ def test_message_without_task_tag_is_logged_with_head(monkeypatch, capsys):
     assert entry["prompt_head"].startswith("[ERROR] Вы не использовали") and len(entry["prompt_head"]) <= 200
 
 
+SYSTEM_SAMPLE = (
+    "You are Cline.\n\n====\n\nRULES\n\n====\n\n- one\n- two\n\n"
+    "====\n\nUSER'S CUSTOM INSTRUCTIONS\n\n====\n\nSECRET-RULE-TEXT\n\n# Раздел\nтекст\n<tools>\nx\n"
+)
+
+
+def test_system_outline_has_headings_and_lengths_without_text():
+    out = openai_proxy._system_outline([{"role": "system", "content": SYSTEM_SAMPLE}, user("hi")])
+    names = [n for n, _ in out]
+    assert "RULES" in names and "USER'S CUSTOM INSTRUCTIONS" in names and "Раздел" in names and "<tools>" in names
+    assert all(isinstance(c, int) and c > 0 for _, c in out)
+    assert "SECRET-RULE-TEXT" not in json.dumps(out, ensure_ascii=False)
+    assert openai_proxy._system_outline([user("hi")]) == []
+
+
+def test_system_outline_logged_once_per_layout(monkeypatch, capsys):
+    monkeypatch.setenv("PROXY_BACKEND", "code")
+    monkeypatch.setenv("PROXY_LOG_FILE", "")
+    openai_proxy._outlines_seen.clear()
+    install(monkeypatch)
+    msgs = [{"role": "system", "content": SYSTEM_SAMPLE}, user(CLINE_FIRST)]
+    post({"messages": msgs})
+    post({"messages": msgs})
+    entries = log_lines(capsys)
+    assert "system_outline" in entries[-2] and "system_outline" not in entries[-1]
+    assert "SECRET-RULE-TEXT" not in json.dumps(entries)
+
+
 def test_normal_task_has_no_prompt_head(monkeypatch, capsys):
     monkeypatch.setenv("PROXY_BACKEND", "code")
     monkeypatch.setenv("PROXY_LOG_FILE", "")

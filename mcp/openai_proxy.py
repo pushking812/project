@@ -901,6 +901,54 @@ def _tool_arg(name: str, args) -> str:
     return ""
 
 
+_HEADING_MD = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
+_HEADING_CAPS = re.compile(r"^[A-Z][A-Z0-9 '’&/,()-]{2,60}$")
+_HEADING_TAG = re.compile(r"^<([a-zA-Z_][\w-]{1,40})>\s*$")
+_outlines_seen: set[str] = set()
+
+
+def _between_rules(lines: list[str], i: int) -> bool:
+    """Строка i стоит между двумя линиями «====» (допускается одна пустая строка с каждой стороны)."""
+    def rule(j: int) -> bool:
+        return 0 <= j < len(lines) and lines[j].strip().startswith("===")
+
+    def side(step: int) -> bool:
+        j = i + step
+        if 0 <= j < len(lines) and not lines[j].strip():
+            j += step
+        return rule(j)
+    return side(-1) and side(1)
+
+
+def _system_outline(messages: list) -> list[list]:
+    """Разведка: заголовки разделов системного сообщения и длины разделов [[заголовок, знаков], ...].
+    Текст разделов не возвращается. Заголовок: «# …», строка ПРОПИСНЫМИ между «====», тег «<имя>» в строке."""
+    text = "\n\n".join(_text(m.get("content")) for m in messages
+                       if isinstance(m, dict) and m.get("role") == "system")
+    if not text.strip():
+        return []
+    lines = text.split("\n")
+    out: list[list] = []
+    name, size = "(начало)", 0
+    for i, line in enumerate(lines):
+        s = line.strip()
+        head = None
+        if m := _HEADING_MD.match(line):
+            head = m.group(1)[:60]
+        elif _HEADING_CAPS.match(s) and _between_rules(lines, i):
+            head = s
+        elif m := _HEADING_TAG.match(s):
+            head = "<" + m.group(1) + ">"
+        if head:
+            if size:
+                out.append([name, size])
+            name, size = head, 0
+        size += len(line) + 1
+    if size:
+        out.append([name, size])
+    return out[:80]
+
+
 def _done_summary(data: dict) -> str:
     """Итог по факту из done.steps: что сервер реально сделал на компьютере (не со слов модели)."""
     steps = [" ".join(str(s).split()) for s in (data.get("steps") or []) if str(s).strip()]
@@ -953,6 +1001,13 @@ async def _chat_code(request: Request, messages: list, stream: bool, model: str,
     if last_raw and not _TASK_TAG.search(last_raw):
         log["no_task_tag"] = True
         log["prompt_head"] = " ".join(last_raw.split())[:200]
+    # Разведка для переноса правил Cline в notes: заголовки и длины разделов, без текста; один раз на набор.
+    outline = _system_outline(messages)
+    if outline:
+        key_o = hashlib.sha1(json.dumps(outline, ensure_ascii=False).encode()).hexdigest()[:12]
+        if key_o not in _outlines_seen:
+            _outlines_seen.add(key_o)
+            log["system_outline"] = outline
     await _slots.acquire()
     handed_over = False
     try:
