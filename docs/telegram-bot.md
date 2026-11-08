@@ -53,6 +53,8 @@ cd mcp
 | `TELEGRAM_POLL_INTERVAL` | `2.0` | как часто спрашивать `task_status` |
 | `TELEGRAM_ASK_TIMEOUT` | `600` | таймаут `/ask` и `/compact` |
 | `TELEGRAM_MAX_MESSAGE` | `3900` | размер куска сообщения (лимит Telegram — 4096) |
+| `TELEGRAM_POLL_TIMEOUT` | `25` | секунд ожидания в long polling (0–50) |
+| `TELEGRAM_ALLOW_REMOTE` | `0` | `1` — MCP-сервер не на этом компьютере (так же действует `ASK_ALLOW_REMOTE`) |
 | `TELEGRAM_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`; лог только в stderr |
 
 Все переменные читаются из `mcp\.env` и окружения; уже заданная переменная окружения сильнее `.env`.
